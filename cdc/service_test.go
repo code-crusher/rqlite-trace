@@ -131,6 +131,97 @@ func Test_ServiceSingleEvent(t *testing.T) {
 	waitFn(2*time.Second, 1)
 }
 
+// Test_ServiceSingleEvent_MultipleEndpoints tests that a single event is
+// delivered to every configured endpoint.
+func Test_ServiceSingleEvent_MultipleEndpoints(t *testing.T) {
+	ResetStats()
+
+	newEndpoint := func() (*httptest.Server, chan []byte) {
+		bodyCh := make(chan []byte, 1)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer r.Body.Close()
+			b, _ := io.ReadAll(r.Body)
+			bodyCh <- b
+			w.WriteHeader(http.StatusOK)
+		}))
+		return srv, bodyCh
+	}
+	testSrv1, bodyCh1 := newEndpoint()
+	defer testSrv1.Close()
+	testSrv2, bodyCh2 := newEndpoint()
+	defer testSrv2.Close()
+
+	cl := &mockCluster{}
+
+	cfg := DefaultConfig()
+	cfg.Endpoints = []string{testSrv1.URL, testSrv2.URL}
+	cfg.MaxBatchSz = 1
+	cfg.MaxBatchDelay = 50 * time.Millisecond
+	in := make(chan *proto.CDCIndexedEventGroup, 100)
+	svc, err := NewService(
+		"node1",
+		t.TempDir(),
+		cl,
+		in,
+		cfg,
+	)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	if err := svc.Start(); err != nil {
+		t.Fatalf("failed to start service: %v", err)
+	}
+	defer svc.Stop()
+	cl.SetLeader(0)
+
+	evs := &proto.CDCIndexedEventGroup{
+		Index: 66,
+		Events: []*proto.CDCEvent{
+			{
+				Op:          proto.CDCEvent_INSERT,
+				Table:       "foo",
+				ColumnNames: []string{"id", "name"},
+				NewRowId:    2,
+			},
+		},
+	}
+	in <- evs
+
+	exp := &cdcjson.CDCMessagesEnvelope{
+		NodeID: "node1",
+		Payload: []*cdcjson.CDCMessage{
+			{
+				Index: evs.Index,
+				Events: []*cdcjson.CDCMessageEvent{
+					{
+						Op:       "INSERT",
+						Table:    "foo",
+						NewRowID: 2,
+					},
+				},
+			},
+		},
+	}
+	for i, bodyCh := range []chan []byte{bodyCh1, bodyCh2} {
+		select {
+		case got := <-bodyCh:
+			msg := &cdcjson.CDCMessagesEnvelope{}
+			if err := cdcjson.UnmarshalFromEnvelopeJSON(got, msg); err != nil {
+				t.Fatalf("endpoint %d: invalid JSON received: %v", i, err)
+			}
+			if !reflect.DeepEqual(msg, exp) {
+				t.Fatalf("endpoint %d: unexpected payload: got %v, want %v", i, msg, exp)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for HTTP POST to endpoint %d", i)
+		}
+	}
+
+	testPoll(t, func() bool {
+		return svc.HighWatermark() == evs.Index
+	}, 2*time.Second)
+}
+
 func Test_ServiceSingleEvent_Flush(t *testing.T) {
 	ResetStats()
 

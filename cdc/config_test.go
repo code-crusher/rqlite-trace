@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -214,6 +215,96 @@ func Test_NewConfig_PartialConfig(t *testing.T) {
 	// Verify unspecified fields have zero values
 	if config.MaxBatchDelay != DefaultMaxBatchDelay {
 		t.Fatalf("Expected MaxBatchDelay to be %v, got %v", DefaultMaxBatchDelay, config.MaxBatchDelay)
+	}
+}
+
+func Test_NewConfig_MultipleEndpoints(t *testing.T) {
+	tempDir := t.TempDir()
+
+	configJSON := `{
+		"endpoint": "https://one.example.com/cdc",
+		"endpoints": [
+			"https://two.example.com/cdc",
+			"https://three.example.com/cdc"
+		]
+	}`
+
+	configFile := filepath.Join(tempDir, "endpoints.json")
+	if err := os.WriteFile(configFile, []byte(configJSON), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	config, err := NewConfig(configFile)
+	if err != nil {
+		t.Fatalf("NewConfig returned unexpected error: %v", err)
+	}
+	if config.Endpoint != "https://one.example.com/cdc" {
+		t.Fatalf("Expected endpoint %q, got %q", "https://one.example.com/cdc", config.Endpoint)
+	}
+	if exp, got := 2, len(config.Endpoints); exp != got {
+		t.Fatalf("Expected %d endpoints, got %d", exp, got)
+	}
+
+	exp := []string{
+		"https://one.example.com/cdc",
+		"https://two.example.com/cdc",
+		"https://three.example.com/cdc",
+	}
+	if got := config.allEndpoints(); !reflect.DeepEqual(got, exp) {
+		t.Fatalf("Expected endpoints %v, got %v", exp, got)
+	}
+}
+
+func TestConfig_allEndpoints(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *Config
+		exp    []string
+	}{
+		{
+			name:   "no endpoints",
+			config: &Config{},
+			exp:    nil,
+		},
+		{
+			name:   "endpoint only",
+			config: &Config{Endpoint: "http://one.example.com/cdc"},
+			exp:    []string{"http://one.example.com/cdc"},
+		},
+		{
+			name:   "endpoints only",
+			config: &Config{Endpoints: []string{"http://one.example.com/cdc", "http://two.example.com/cdc"}},
+			exp:    []string{"http://one.example.com/cdc", "http://two.example.com/cdc"},
+		},
+		{
+			name: "endpoint and endpoints",
+			config: &Config{
+				Endpoint:  "http://one.example.com/cdc",
+				Endpoints: []string{"http://two.example.com/cdc"},
+			},
+			exp: []string{"http://one.example.com/cdc", "http://two.example.com/cdc"},
+		},
+		{
+			name: "duplicate endpoint",
+			config: &Config{
+				Endpoint:  "http://one.example.com/cdc",
+				Endpoints: []string{"http://one.example.com/cdc", "http://two.example.com/cdc"},
+			},
+			exp: []string{"http://one.example.com/cdc", "http://two.example.com/cdc"},
+		},
+		{
+			name:   "empty entries ignored",
+			config: &Config{Endpoint: "", Endpoints: []string{"", "http://one.example.com/cdc", ""}},
+			exp:    []string{"http://one.example.com/cdc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.config.allEndpoints(); !reflect.DeepEqual(got, tt.exp) {
+				t.Fatalf("Expected %v, got %v", tt.exp, got)
+			}
+		})
 	}
 }
 

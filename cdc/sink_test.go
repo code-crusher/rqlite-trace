@@ -319,3 +319,191 @@ func Test_NewSink_InvalidURL(t *testing.T) {
 		t.Errorf("Expected URL parse error, got: %v", err)
 	}
 }
+
+func Test_MultiSink_Write(t *testing.T) {
+	bodyCh1 := make(chan []byte, 1)
+	testSrv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		bodyCh1 <- b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testSrv1.Close()
+
+	bodyCh2 := make(chan []byte, 1)
+	testSrv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		bodyCh2 <- b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer testSrv2.Close()
+
+	sink := NewMultiSink(
+		NewHTTPSink(testSrv1.URL, nil, 5*time.Second),
+		NewHTTPSink(testSrv2.URL, nil, 5*time.Second),
+	)
+
+	testData := []byte(`{"test": "data"}`)
+	n, err := sink.Write(testData)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if n != len(testData) {
+		t.Errorf("Expected %d bytes written, got %d", len(testData), n)
+	}
+
+	for i, ch := range []chan []byte{bodyCh1, bodyCh2} {
+		select {
+		case got := <-ch:
+			if !bytes.Equal(got, testData) {
+				t.Errorf("sink %d: expected data %s, got %s", i, testData, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("sink %d did not receive data", i)
+		}
+	}
+}
+
+// Test_MultiSink_Write_PartialFailure tests that every sink is attempted even
+// when one fails, and that the failure is reported so the batch is retried.
+func Test_MultiSink_Write_PartialFailure(t *testing.T) {
+	failingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failingSrv.Close()
+
+	bodyCh := make(chan []byte, 1)
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		bodyCh <- b
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer okSrv.Close()
+
+	sink := NewMultiSink(
+		NewHTTPSink(failingSrv.URL, nil, 5*time.Second),
+		NewHTTPSink(okSrv.URL, nil, 5*time.Second),
+	)
+
+	testData := []byte(`{"test": "data"}`)
+	if _, err := sink.Write(testData); err == nil {
+		t.Fatal("Write should fail when any sink fails")
+	}
+
+	select {
+	case got := <-bodyCh:
+		if !bytes.Equal(got, testData) {
+			t.Errorf("expected data %s, got %s", testData, got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("working sink did not receive data")
+	}
+}
+
+func Test_MultiSink_String(t *testing.T) {
+	sink := NewMultiSink(
+		NewHTTPSink("http://one.example.com/cdc", nil, 5*time.Second),
+		NewHTTPSink("http://two.example.com/cdc", nil, 5*time.Second),
+	)
+	exp := "http://one.example.com/cdc, http://two.example.com/cdc"
+	if got := sink.String(); got != exp {
+		t.Errorf("Expected %q, got %q", exp, got)
+	}
+}
+
+func Test_MultiSink_Close(t *testing.T) {
+	sink := NewMultiSink(
+		NewHTTPSink("http://one.example.com/cdc", nil, 5*time.Second),
+		NewHTTPSink("http://two.example.com/cdc", nil, 5*time.Second),
+	)
+	if err := sink.Close(); err != nil {
+		t.Errorf("Close should not return error, got: %v", err)
+	}
+}
+
+func Test_newSinkFromConfig(t *testing.T) {
+	t.Run("single endpoint", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Endpoint = "http://one.example.com/cdc"
+
+		sink, err := newSinkFromConfig(cfg, nil)
+		if err != nil {
+			t.Fatalf("newSinkFromConfig failed: %v", err)
+		}
+		if _, ok := sink.(*HTTPSink); !ok {
+			t.Errorf("Expected HTTPSink, got %T", sink)
+		}
+	})
+
+	t.Run("multiple endpoints", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Endpoints = []string{
+			"http://one.example.com/cdc",
+			"http://two.example.com/cdc",
+		}
+
+		sink, err := newSinkFromConfig(cfg, nil)
+		if err != nil {
+			t.Fatalf("newSinkFromConfig failed: %v", err)
+		}
+		ms, ok := sink.(*MultiSink)
+		if !ok {
+			t.Fatalf("Expected MultiSink, got %T", sink)
+		}
+		if exp, got := 2, len(ms.sinks); exp != got {
+			t.Errorf("Expected %d sinks, got %d", exp, got)
+		}
+	})
+
+	t.Run("endpoint and endpoints", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Endpoint = "http://one.example.com/cdc"
+		cfg.Endpoints = []string{"http://two.example.com/cdc"}
+
+		sink, err := newSinkFromConfig(cfg, nil)
+		if err != nil {
+			t.Fatalf("newSinkFromConfig failed: %v", err)
+		}
+		ms, ok := sink.(*MultiSink)
+		if !ok {
+			t.Fatalf("Expected MultiSink, got %T", sink)
+		}
+		if exp, got := 2, len(ms.sinks); exp != got {
+			t.Errorf("Expected %d sinks, got %d", exp, got)
+		}
+	})
+
+	t.Run("duplicate endpoints", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Endpoint = "http://one.example.com/cdc"
+		cfg.Endpoints = []string{"http://one.example.com/cdc"}
+
+		sink, err := newSinkFromConfig(cfg, nil)
+		if err != nil {
+			t.Fatalf("newSinkFromConfig failed: %v", err)
+		}
+		if _, ok := sink.(*HTTPSink); !ok {
+			t.Errorf("Expected HTTPSink for duplicate endpoints, got %T", sink)
+		}
+	})
+
+	t.Run("no endpoint", func(t *testing.T) {
+		cfg := DefaultConfig()
+		if _, err := newSinkFromConfig(cfg, nil); err == nil {
+			t.Fatal("newSinkFromConfig should fail with no endpoint configured")
+		}
+	})
+
+	t.Run("invalid endpoint", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Endpoints = []string{
+			"http://one.example.com/cdc",
+			"ftp://two.example.com/cdc",
+		}
+		if _, err := newSinkFromConfig(cfg, nil); err == nil {
+			t.Fatal("newSinkFromConfig should fail with an unsupported scheme")
+		}
+	})
+}

@@ -137,12 +137,13 @@ This keeps follower FIFO sizes bounded and ensures that if a follower becomes le
 
 ### Sink
 
-The `Sink` interface abstracts the delivery target. Two implementations exist:
+The `Sink` interface abstracts the delivery target. Three implementations exist:
 
 - **HTTPSink**: POSTs JSON payloads to an HTTP/HTTPS endpoint. Supports TLS configuration including mutual TLS.
 - **StdoutSink**: Writes events to stdout, useful for debugging and testing.
+- **MultiSink**: Delivers each batch to a set of sinks, one per configured endpoint. Every sink is attempted even if another fails, so a single unavailable endpoint does not hold up delivery to the rest. A batch is only considered delivered when every sink accepts it; otherwise it is retried, and sinks which already accepted it may see it again. This is consistent with the at-least-once guarantee, and lets a cluster stream its changes to more than one downstream consumer.
 
-The sink is selected based on the configured endpoint string. Using `"stdout"` as the endpoint activates the StdoutSink.
+The sink is selected based on the configured endpoint string. Using `"stdout"` as the endpoint activates the StdoutSink. If more than one endpoint is configured, a MultiSink is used.
 
 ### Cluster Interface
 
@@ -189,11 +190,24 @@ The CDC service is configured via `-cdc-config`, which accepts either:
 - The string `"stdout"` — writes events to stdout.
 - A file path — reads a JSON configuration file with full control over all parameters.
 
+To deliver every event to more than one endpoint, set `endpoints` in the JSON
+configuration file. If `endpoint` is also set, events are sent to it as well.
+
+```json
+{
+  "endpoints": [
+    "https://consumer-one.example.com/cdc",
+    "https://consumer-two.example.com/cdc"
+  ]
+}
+```
+
 ### Configurable Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `endpoint` | (required) | Webhook URL or `"stdout"` |
+| `endpoint` | (required unless `endpoints` is set) | Webhook URL or `"stdout"` |
+| `endpoints` | (none) | Additional webhook URLs, all of which receive every event |
 | `service_id` | (empty) | Optional identifier for multi-cluster setups |
 | `row_ids_only` | false | Omit before/after column data |
 | `table_filter` | (none) | Regex to filter which tables are captured |

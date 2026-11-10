@@ -3,6 +3,7 @@ package cdc
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -140,4 +141,84 @@ func NewSink(cfg SinkConfig) (Sink, error) {
 	default:
 		return nil, fmt.Errorf("cdc: unsupported scheme %q", u.Scheme)
 	}
+}
+
+// MultiSink implements Sink by writing to a set of sinks. It is used to
+// deliver CDC events to more than one endpoint.
+type MultiSink struct {
+	sinks []Sink
+}
+
+// NewMultiSink creates a new MultiSink which writes to each of the given sinks.
+func NewMultiSink(sinks ...Sink) *MultiSink {
+	return &MultiSink{sinks: sinks}
+}
+
+// Write writes the data to every sink. Every sink is attempted, even if an
+// earlier one fails, so that a single failing endpoint does not hold up
+// delivery to the others. An error is returned if any sink fails, which
+// causes the batch to be retried. A retry writes to every sink again, so
+// sinks which already accepted the batch may see it more than once; this is
+// consistent with the at-least-once delivery guarantee.
+func (m *MultiSink) Write(p []byte) (n int, err error) {
+	var errs []error
+	for _, sink := range m.sinks {
+		if _, err := sink.Write(p); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", sink.String(), err))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// Close releases resources held by all sinks.
+func (m *MultiSink) Close() error {
+	var errs []error
+	for _, sink := range m.sinks {
+		if err := sink.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (m *MultiSink) String() string {
+	ss := make([]string, len(m.sinks))
+	for i, sink := range m.sinks {
+		ss[i] = sink.String()
+	}
+	return strings.Join(ss, ", ")
+}
+
+// newSinkFromConfig creates a Sink which delivers to every endpoint configured
+// in cfg. If more than one endpoint is configured, the returned Sink is a
+// MultiSink.
+func newSinkFromConfig(cfg *Config, tlsConfig *tls.Config) (Sink, error) {
+	endpoints := cfg.allEndpoints()
+	if len(endpoints) == 0 {
+		return nil, errors.New("no CDC endpoint configured")
+	}
+
+	sinks := make([]Sink, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		sink, err := NewSink(SinkConfig{
+			Endpoint:        endpoint,
+			TLSConfig:       tlsConfig,
+			TransmitTimeout: cfg.TransmitTimeout,
+		})
+		if err != nil {
+			for _, s := range sinks {
+				s.Close()
+			}
+			return nil, fmt.Errorf("failed to create sink for endpoint %s: %w", endpoint, err)
+		}
+		sinks = append(sinks, sink)
+	}
+
+	if len(sinks) == 1 {
+		return sinks[0], nil
+	}
+	return NewMultiSink(sinks...), nil
 }

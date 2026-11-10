@@ -132,7 +132,8 @@ type Config struct {
 	AutoBackupFile string
 	// Path to automatic restore configuration file. If not set, not enabled
 	AutoRestoreFile string
-	// Set CDC HTTP endpoint, or path to CDC config file. If not set, CDC not enabled
+	// Set CDC HTTP endpoint, or path to CDC config file, which may specify multiple endpoints.
+	// If not set, CDC not enabled
 	CDCConfig string
 	// Username in authentication file to perform internode CDC operations. If not set, performs CDC operations anonymously
 	CDCAs string
@@ -222,7 +223,7 @@ func Forge(arguments []string) (*flag.FlagSet, *Config, error) {
 	fs.IntVar(&config.WriteQueueRetry, "write-queue-retry", 1, "How many times to retry a queued write")
 	fs.StringVar(&config.AutoBackupFile, "auto-backup", "", "Path to automatic backup configuration file. If not set, not enabled")
 	fs.StringVar(&config.AutoRestoreFile, "auto-restore", "", "Path to automatic restore configuration file. If not set, not enabled")
-	fs.StringVar(&config.CDCConfig, "cdc-config", "", "Set CDC HTTP endpoint, or path to CDC config file. If not set, CDC not enabled")
+	fs.StringVar(&config.CDCConfig, "cdc-config", "", "Set CDC HTTP endpoint, or path to CDC config file, which may specify multiple endpoints. If not set, CDC not enabled")
 	fs.StringVar(&config.CDCAs, "cdc-as", "", "Username in authentication file to perform internode CDC operations. If not set, performs CDC operations anonymously")
 	fs.StringVar(&config.CPUProfile, "cpu-profile", "", "Path to file for CPU profiling information")
 	fs.StringVar(&config.MemProfile, "mem-profile", "", "Path to file for memory profiling information")

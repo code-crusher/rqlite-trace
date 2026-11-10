@@ -56,8 +56,15 @@ type TLSConfiguration struct {
 
 // Config holds the configuration for the CDC service.
 type Config struct {
-	// Endpoint is the HTTP endpoint to which the CDC events are sent. It must be specified.
+	// Endpoint is the HTTP endpoint to which the CDC events are sent. It must be specified,
+	// unless Endpoints is set. If both Endpoint and Endpoints are set, events are sent to
+	// all of them.
 	Endpoint string `json:"endpoint"`
+
+	// Endpoints are the HTTP endpoints to which the CDC events are sent. This allows CDC
+	// events to be streamed to more than one consumer. If Endpoint is also set, events are
+	// sent to it as well.
+	Endpoints []string `json:"endpoints,omitempty"`
 
 	// ServiceID is an optional field. If set, it will be part of the event sent to the downstream
 	// CDC consumer. This allows CDC consumers to receive events from multiple rqlite systems
@@ -123,6 +130,30 @@ func DefaultConfig() *Config {
 		TransmitMinBackoff:    DefaultTransmitMinBackoff,
 		TransmitMaxBackoff:    DefaultTransmitMaxBackoff,
 	}
+}
+
+// allEndpoints returns every configured endpoint, with Endpoint first, if set,
+// followed by Endpoints. Duplicate endpoints are removed, since sending the
+// same event twice to the same consumer serves no purpose. Empty entries are
+// ignored.
+func (c *Config) allEndpoints() []string {
+	var endpoints []string
+	seen := make(map[string]struct{})
+	add := func(endpoint string) {
+		if endpoint == "" {
+			return
+		}
+		if _, ok := seen[endpoint]; ok {
+			return
+		}
+		seen[endpoint] = struct{}{}
+		endpoints = append(endpoints, endpoint)
+	}
+	add(c.Endpoint)
+	for _, endpoint := range c.Endpoints {
+		add(endpoint)
+	}
+	return endpoints
 }
 
 // TLSConfig creates a *tls.Config from the individual TLS configuration fields.

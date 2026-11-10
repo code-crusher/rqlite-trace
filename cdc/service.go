@@ -248,13 +248,8 @@ func NewService(nodeID, dir string, clstr Cluster, in <-chan *proto.CDCIndexedEv
 		return nil, fmt.Errorf("failed to build TLS config: %w", err)
 	}
 
-	// Create sink based on configuration
-	sinkConfig := SinkConfig{
-		Endpoint:        cfg.Endpoint,
-		TLSConfig:       tlsConfig,
-		TransmitTimeout: cfg.TransmitTimeout,
-	}
-	sink, err := NewSink(sinkConfig)
+	// Create the sink, or sinks, based on configuration.
+	sink, err := newSinkFromConfig(cfg, tlsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sink: %w", err)
 	}

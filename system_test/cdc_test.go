@@ -64,6 +64,63 @@ func Test_CDC_SingleNode(t *testing.T) {
 	})
 }
 
+// Test_CDC_SingleNode_MultipleEndpoints verifies that every configured CDC
+// endpoint receives the events.
+func Test_CDC_SingleNode_MultipleEndpoints(t *testing.T) {
+	node := mustNewLeaderNodeCDC("node1")
+	defer node.Deprovision()
+
+	endpoint1 := cdctest.NewHTTPTestServer()
+	endpoint1.Start()
+	defer endpoint1.Close()
+	endpoint2 := cdctest.NewHTTPTestServer()
+	endpoint2.Start()
+	defer endpoint2.Close()
+
+	cdcCluster := cdc.NewCDCCluster(node.Store, node.Cluster, node.Client)
+	cdcCfg := mustCDCConfig("")
+	cdcCfg.Endpoints = []string{endpoint1.URL(), endpoint2.URL()}
+	cdcService, err := cdc.NewService(node.ID, node.Dir, cdcCluster, node.Store.CDCEventsC(), cdcCfg)
+	if err != nil {
+		t.Fatalf("failed to create CDC service: %s", err.Error())
+	}
+	node.CDC = cdcService
+	node.CDC.Start()
+	node.CDC.SetLeader(true)
+
+	_, err = node.Execute(`CREATE TABLE foo (id integer not null primary key, name text)`)
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+	_, err = node.Execute(`INSERT INTO foo (id, name) VALUES (1, 'Alice')`)
+	if err != nil {
+		t.Fatalf("failed to insert data: %v", err)
+	}
+	_, err = node.Execute(`UPDATE foo SET name = 'Alice Updated' WHERE id = 1`)
+	if err != nil {
+		t.Fatalf("failed to update data: %v", err)
+	}
+	_, err = node.Execute(`DELETE FROM foo WHERE id = 1`)
+	if err != nil {
+		t.Fatalf("failed to delete data: %v", err)
+	}
+
+	for i, endpoint := range []*cdctest.HTTPTestServer{endpoint1, endpoint2} {
+		testPoll(t, func() (bool, error) {
+			// 1 insert, 1 update, 1 delete
+			return endpoint.GetMessageCount() == 3, nil
+		}, 100*time.Millisecond, 10*time.Second)
+
+		if exp, got := 3, endpoint.GetMessageCount(); exp != got {
+			t.Fatalf("endpoint %d: expected %d messages, got %d", i, exp, got)
+		}
+	}
+
+	testPoll(t, func() (bool, error) {
+		return node.CDC.HighWatermark() == endpoint1.GetHighestMessageIndex(), nil
+	}, 100*time.Millisecond, 10*time.Second)
+}
+
 func Test_CDC_SingleNode_Snapshot(t *testing.T) {
 	testFn := func(t *testing.T, failRate int) {
 		node := mustNewLeaderNodeCDC("node1")
