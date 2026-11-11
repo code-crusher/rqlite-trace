@@ -18,8 +18,8 @@ type Config struct {
 	ShowVersion bool
 	// Unique ID for node. If not set, set to advertised Raft address
 	NodeID string
-	// HTTP server bind address. To enable HTTPS, set X.509 certificate and key
-	HTTPAddr string
+	// Comma-delimited list of HTTP server bind addresses. To enable HTTPS, set X.509 certificate and key
+	HTTPAddrs []string
 	// Advertised HTTP address. If not set, same as HTTP server bind address
 	HTTPAdv string
 	// Value to set for Access-Control-Allow-Origin HTTP header
@@ -164,7 +164,8 @@ func Forge(arguments []string) (*flag.FlagSet, *Config, error) {
 	fs := flag.NewFlagSet("rqlited", flag.ExitOnError)
 	fs.BoolVar(&config.ShowVersion, "version", false, "Show version information and exit")
 	fs.StringVar(&config.NodeID, "node-id", "", "Unique ID for node. If not set, set to advertised Raft address")
-	fs.StringVar(&config.HTTPAddr, "http-addr", "localhost:4001", "HTTP server bind address. To enable HTTPS, set X.509 certificate and key")
+	var tmpHTTPAddrs string
+	fs.StringVar(&tmpHTTPAddrs, "http-addr", "localhost:4001", "Comma-delimited list of HTTP server bind addresses. To enable HTTPS, set X.509 certificate and key")
 	fs.StringVar(&config.HTTPAdv, "http-adv-addr", "", "Advertised HTTP address. If not set, same as HTTP server bind address")
 	fs.StringVar(&config.HTTPAllowOrigin, "http-allow-origin", "", "Value to set for Access-Control-Allow-Origin HTTP header")
 	fs.StringVar(&config.HTTPx509Cert, "http-cert", "", "Path to HTTPS X.509 certificate")
@@ -228,13 +229,14 @@ func Forge(arguments []string) (*flag.FlagSet, *Config, error) {
 	fs.StringVar(&config.MemProfile, "mem-profile", "", "Path to file for memory profiling information")
 	fs.StringVar(&config.TraceProfile, "trace-profile", "", "Path to file for trace profiling information")
 	fs.Usage = func() {
-		usage("\nrqlite is a lightweight, distributed relational database, which uses SQLite as its\nstorage engine. It provides an easy-to-use, fault-tolerant store for relational data.\n\nVisit https://www.rqlite.io to learn more.\n\nUsage: rqlited [flags] <data directory>\n")
+		usage("\nrqlite is a lightweight, fault-tolerant relational database, which uses SQLite as its\nstorage engine. It provides an easy-to-use, fault-tolerant store for relational data.\n\nVisit https://www.rqlite.io to learn more.\n\nUsage: rqlited [flags] <data directory>\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(arguments); err != nil {
 		return nil, nil, err
 	}
 	config.DataPath = fs.Arg(0)
+	config.HTTPAddrs = splitString(tmpHTTPAddrs, ",")
 	config.ExtensionPaths = splitString(tmpExtensionPaths, ",")
 	return fs, config, nil
 }

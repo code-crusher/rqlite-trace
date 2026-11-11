@@ -89,8 +89,17 @@ func (c *Config) Validate() error {
 		return errors.New("-node-verify-common-name requires -node-verify-client")
 	}
 
-	if c.RaftAddr == c.HTTPAddr {
-		return errors.New("HTTP and Raft addresses must differ")
+	if len(c.HTTPAddrs) == 0 {
+		return errors.New("at least one HTTP bind address is required")
+	}
+	for i := range c.HTTPAddrs {
+		c.HTTPAddrs[i] = strings.TrimSpace(c.HTTPAddrs[i])
+		if c.HTTPAddrs[i] == "" {
+			return errors.New("HTTP bind address must not be empty")
+		}
+		if c.HTTPAddrs[i] == c.RaftAddr {
+			return errors.New("HTTP and Raft addresses must differ")
+		}
 	}
 
 	// Enforce policies regarding addresses
@@ -98,7 +107,11 @@ func (c *Config) Validate() error {
 		c.RaftAdv = c.RaftAddr
 	}
 	if c.HTTPAdv == "" {
-		c.HTTPAdv = c.HTTPAddr
+		if len(c.HTTPAddrs) > 1 {
+			return fmt.Errorf("advertised HTTP address must be set when multiple HTTP bind addresses are configured, specify it via -%s",
+				HTTPAdvAddrFlag)
+		}
+		c.HTTPAdv = c.HTTPAddrs[0]
 	}
 
 	// Node ID policy
@@ -107,12 +120,16 @@ func (c *Config) Validate() error {
 	}
 
 	// Perform some address validity checks.
-	if strings.HasPrefix(strings.ToLower(c.HTTPAddr), "http") ||
-		strings.HasPrefix(strings.ToLower(c.HTTPAdv), "http") {
+	if strings.HasPrefix(strings.ToLower(c.HTTPAdv), "http") {
 		return errors.New("HTTP options should not include protocol (http:// or https://)")
 	}
-	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
-		return errors.New("HTTP bind address not valid")
+	for _, addr := range c.HTTPAddrs {
+		if strings.HasPrefix(strings.ToLower(addr), "http") {
+			return errors.New("HTTP options should not include protocol (http:// or https://)")
+		}
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("HTTP bind address not valid: %s", addr)
+		}
 	}
 
 	hadv, _, err := net.SplitHostPort(c.HTTPAdv)
