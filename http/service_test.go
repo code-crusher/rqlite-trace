@@ -20,6 +20,7 @@ import (
 
 	cluster "github.com/rqlite/rqlite/v10/cluster/proto"
 	command "github.com/rqlite/rqlite/v10/command/proto"
+	"github.com/rqlite/rqlite/v10/db"
 	"github.com/rqlite/rqlite/v10/proxy"
 	"github.com/rqlite/rqlite/v10/queue"
 	"github.com/rqlite/rqlite/v10/store"
@@ -426,6 +427,7 @@ func Test_401Routes_NoBasicAuth(t *testing.T) {
 		"/db/request",
 		"/db/backup",
 		"/db/load",
+		"/db/metadata",
 		"/boot",
 		"/remove",
 		"/demote",
@@ -471,6 +473,7 @@ func Test_401Routes_BasicAuthBadPassword(t *testing.T) {
 		"/db/request",
 		"/db/backup",
 		"/db/load",
+		"/db/metadata",
 		"/boot",
 		"/status",
 		"/nodes",
@@ -520,6 +523,7 @@ func Test_401Routes_BasicAuthBadPerm(t *testing.T) {
 		"/db/request",
 		"/db/load",
 		"/db/sql",
+		"/db/metadata",
 		"/boot",
 		"/snapshot",
 		"/status",
@@ -3249,6 +3253,7 @@ type MockStore struct {
 	removeFn    func(rn *command.RemoveNodeRequest) error
 	demoteFn    func(dn *command.DemoteNodeRequest) error
 	promoteFn   func(pn *command.PromoteNodeRequest) error
+	metadataFn  func(sql string) (db.StmtMetadata, error)
 	leaderAddr  string
 	notReady    bool // Inverted so Ready() defaults to true, easier to test.
 }
@@ -3376,6 +3381,13 @@ func (m *MockStore) Stepdown(wait bool, id string) error {
 
 func (m *MockStore) LeaderAddr() (string, error) {
 	return m.leaderAddr, nil
+}
+
+func (m *MockStore) StmtMetadata(sql string) (db.StmtMetadata, error) {
+	if m.metadataFn != nil {
+		return m.metadataFn(sql)
+	}
+	return db.StmtMetadata{}, nil
 }
 
 type mockClusterService struct {
@@ -3659,5 +3671,234 @@ func Test_ErrorsParam(t *testing.T) {
 	}
 	if got, exp := do("/db/query", q+"&errors=v1", false), `{"results":[{`+v1+`}]}`; got != exp {
 		t.Fatalf("GET /db/query errors=v1: exp %s, got %s", exp, got)
+	}
+}
+
+// newMetadataHost creates a test HTTP service which returns the given
+// statement metadata for every statement, and returns the host URL.
+func newMetadataHost(t *testing.T, md db.StmtMetadata) string {
+	t.Helper()
+	m := &MockStore{
+		leaderAddr: "foo:1234",
+		metadataFn: func(sql string) (db.StmtMetadata, error) {
+			return md, nil
+		},
+	}
+	c := &mockClusterService{}
+	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	if err := s.Start(); err != nil {
+		t.Fatalf("failed to start service: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return fmt.Sprintf("http://%s", s.Addr().String())
+}
+
+func Test_Metadata_GET(t *testing.T) {
+	host := newMetadataHost(t, db.StmtMetadata{
+		ReadOnly:   false,
+		Parameters: []string{":name", ""},
+	})
+	client := &http.Client{}
+
+	resp, err := client.Get(host + "/db/metadata?q=" + url.QueryEscape("UPDATE foo SET name = :name WHERE id = ?"))
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected StatusOK, got %d", resp.StatusCode)
+	}
+
+	r := mustGetFirstResult(t, mustReadBody(t, resp))
+	if r["original"] != "UPDATE foo SET name = :name WHERE id = ?" {
+		t.Fatalf("unexpected original: %v", r["original"])
+	}
+	if r["read_only"] != false {
+		t.Fatalf("expected read_only to be false, got %v", r["read_only"])
+	}
+	params := r["parameters"].([]any)
+	if exp, got := 2, len(params); exp != got {
+		t.Fatalf("expected %d parameters, got %d", exp, got)
+	}
+	if params[0] != ":name" || params[1] != "" {
+		t.Fatalf("unexpected parameters: %v", params)
+	}
+}
+
+func Test_Metadata_NoParameters(t *testing.T) {
+	host := newMetadataHost(t, db.StmtMetadata{ReadOnly: true})
+	client := &http.Client{}
+
+	resp, err := client.Get(host + "/db/metadata?q=" + url.QueryEscape("SELECT * FROM foo"))
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected StatusOK, got %d", resp.StatusCode)
+	}
+
+	// A statement without parameters must report an empty list, not null.
+	r := mustGetFirstResult(t, mustReadBody(t, resp))
+	params, ok := r["parameters"].([]any)
+	if !ok {
+		t.Fatalf("expected parameters to be a list, got %T", r["parameters"])
+	}
+	if exp, got := 0, len(params); exp != got {
+		t.Fatalf("expected %d parameters, got %d", exp, got)
+	}
+}
+
+func Test_Metadata_POST(t *testing.T) {
+	m := &MockStore{
+		leaderAddr: "foo:1234",
+		metadataFn: func(sql string) (db.StmtMetadata, error) {
+			return db.StmtMetadata{ReadOnly: strings.HasPrefix(sql, "SELECT")}, nil
+		},
+	}
+	c := &mockClusterService{}
+	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	if err := s.Start(); err != nil {
+		t.Fatalf("failed to start service: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	host := fmt.Sprintf("http://%s", s.Addr().String())
+	client := &http.Client{}
+
+	resp, err := client.Post(host+"/db/metadata", "application/json",
+		strings.NewReader(`["SELECT * FROM foo WHERE id = ?", "INSERT INTO foo(id) VALUES(?)"]`))
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected StatusOK, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(mustReadBody(t, resp)), &result); err != nil {
+		t.Fatalf("failed to unmarshal response: %s", err)
+	}
+	results := result["results"].([]any)
+	if exp, got := 2, len(results); exp != got {
+		t.Fatalf("expected %d results, got %d", exp, got)
+	}
+	if results[0].(map[string]any)["read_only"] != true {
+		t.Fatalf("expected first statement to be read-only")
+	}
+	if results[1].(map[string]any)["read_only"] != false {
+		t.Fatalf("expected second statement to not be read-only")
+	}
+}
+
+func Test_Metadata_Error(t *testing.T) {
+	m := &MockStore{
+		leaderAddr: "foo:1234",
+		metadataFn: func(sql string) (db.StmtMetadata, error) {
+			if sql != "SELECT * FROM foo" {
+				return db.StmtMetadata{}, errors.New("syntax error")
+			}
+			return db.StmtMetadata{ReadOnly: true}, nil
+		},
+	}
+	c := &mockClusterService{}
+	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	if err := s.Start(); err != nil {
+		t.Fatalf("failed to start service: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	host := fmt.Sprintf("http://%s", s.Addr().String())
+	client := &http.Client{}
+
+	resp, err := client.Post(host+"/db/metadata", "application/json",
+		strings.NewReader(`["SLECT * FORM foo"]`))
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected StatusOK even for invalid SQL, got %d", resp.StatusCode)
+	}
+
+	r := mustGetFirstResult(t, mustReadBody(t, resp))
+	if r["error"] == nil || r["error"] == "" {
+		t.Fatalf("expected error field to be set for invalid SQL")
+	}
+	if r["original"] != "SLECT * FORM foo" {
+		t.Fatalf("expected original to be preserved even on error")
+	}
+}
+
+func Test_Metadata_StoreError(t *testing.T) {
+	m := &MockStore{
+		leaderAddr: "foo:1234",
+		metadataFn: func(sql string) (db.StmtMetadata, error) {
+			return db.StmtMetadata{}, errors.New("no such table: foo")
+		},
+	}
+	c := &mockClusterService{}
+	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	if err := s.Start(); err != nil {
+		t.Fatalf("failed to start service: %v", err)
+	}
+	defer s.Close()
+	host := fmt.Sprintf("http://%s", s.Addr().String())
+
+	resp, err := (&http.Client{}).Get(host + "/db/metadata?q=" + url.QueryEscape("SELECT * FROM foo"))
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+
+	r := mustGetFirstResult(t, mustReadBody(t, resp))
+	if r["error"] != "no such table: foo" {
+		t.Fatalf("unexpected error: %v", r["error"])
+	}
+}
+
+func Test_Metadata_InvalidJSON(t *testing.T) {
+	host := newSQLAnalyzeHost(t)
+	client := &http.Client{}
+
+	resp, err := client.Post(host+"/db/metadata", "application/json",
+		strings.NewReader(`not json`))
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected StatusBadRequest for invalid JSON, got %d", resp.StatusCode)
+	}
+}
+
+func Test_Metadata_MissingQuery(t *testing.T) {
+	host := newSQLAnalyzeHost(t)
+	client := &http.Client{}
+
+	resp, err := client.Get(host + "/db/metadata")
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected StatusBadRequest for missing query, got %d", resp.StatusCode)
+	}
+}
+
+func Test_Metadata_MethodNotAllowed(t *testing.T) {
+	host := newSQLAnalyzeHost(t)
+	client := &http.Client{}
+
+	req, err := http.NewRequest("DELETE", host+"/db/metadata", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %s", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected StatusMethodNotAllowed, got %d", resp.StatusCode)
 	}
 }

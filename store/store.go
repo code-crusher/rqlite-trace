@@ -2369,6 +2369,12 @@ func (s *Store) RORWCount(eqr *proto.ExecuteQueryRequest) (nRW, nRO int) {
 	return
 }
 
+// StmtMetadata returns metadata about the given SQL statement, without
+// executing it.
+func (s *Store) StmtMetadata(sqlStr string) (sql.StmtMetadata, error) {
+	return s.db.StmtMetadata(sqlStr)
+}
+
 // StagedWALs returns the list of WAL files in the staging directory.
 func (s *Store) StagedWALs() ([]string, error) {
 	return snapshot.NewStagingDir(s.walStagingDir).WALFiles()

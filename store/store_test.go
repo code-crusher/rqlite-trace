@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2999,6 +3000,40 @@ func Test_VerifyLeader(t *testing.T) {
 	}
 	if err := s.VerifyLeader(); err != nil {
 		t.Fatalf("failed to verify leader with boostrapped store: %s", err.Error())
+	}
+}
+
+func Test_StmtMetadata(t *testing.T) {
+	s, ln := mustNewStore(t)
+	defer ln.Close()
+
+	if err := s.Open(); err != nil {
+		t.Fatalf("failed to open single-node store: %s", err.Error())
+	}
+	defer s.Close(true)
+	if err := s.Bootstrap(NewServer(s.ID(), s.Addr(), true)); err != nil {
+		t.Fatalf("failed to bootstrap single-node store: %s", err.Error())
+	}
+	if _, err := s.WaitForLeader(10 * time.Second); err != nil {
+		t.Fatalf("Error waiting for leader: %s", err.Error())
+	}
+
+	er := executeRequestFromString(`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
+		false, false)
+	_, _, err := s.Execute(context.Background(), er)
+	if err != nil {
+		t.Fatalf("failed to execute on single node: %s", err.Error())
+	}
+
+	md, err := s.StmtMetadata(`SELECT * FROM foo WHERE id = :id AND name = ?`)
+	if err != nil {
+		t.Fatalf("failed to get statement metadata: %s", err.Error())
+	}
+	if !md.ReadOnly {
+		t.Fatalf("expected SELECT to be read-only")
+	}
+	if exp, got := []string{":id", ""}, md.Parameters; !slices.Equal(exp, got) {
+		t.Fatalf("expected parameters %v, got %v", exp, got)
 	}
 }
 

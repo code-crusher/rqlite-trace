@@ -598,6 +598,30 @@ func (c *Conn) StmtReadOnly(sql string) (bool, error) {
 	return readOnly, nil
 }
 
+// StmtMetadata returns metadata about the given SQL statement, without
+// executing it. The statement is prepared on the underlying SQLite connection,
+// which is how SQLite itself reports whether the statement is read-only and
+// how many parameters it takes.
+func (c *Conn) StmtMetadata(sqlStr string) (StmtMetadata, error) {
+	var md StmtMetadata
+	f := func(driverConn any) error {
+		c := driverConn.(*sqlite3.SQLiteConn)
+		drvStmt, err := c.Prepare(sqlStr)
+		if err != nil {
+			return err
+		}
+		sqliteStmt := drvStmt.(*sqlite3.SQLiteStmt)
+		md.ReadOnly = sqliteStmt.Readonly()
+		md.Parameters = stmtParameters(sqlStr, sqliteStmt.NumInput())
+		return drvStmt.Close()
+	}
+
+	if err := c.conn.Raw(f); err != nil {
+		return StmtMetadata{}, err
+	}
+	return md, nil
+}
+
 // schemaObjects returns every index, trigger and view of the database, in
 // the order they were created.
 func (c *Conn) schemaObjects(ctx context.Context) (schemaObjects, error) {

@@ -1161,6 +1161,17 @@ func (db *DB) StmtReadOnly(sql string) (bool, error) {
 	return conn.StmtReadOnly(sql)
 }
 
+// StmtMetadata returns metadata about the given SQL statement, without
+// executing it.
+func (db *DB) StmtMetadata(sql string) (StmtMetadata, error) {
+	conn, err := db.AcquireReader(context.Background())
+	if err != nil {
+		return StmtMetadata{}, err
+	}
+	defer conn.Close()
+	return conn.StmtMetadata(sql)
+}
+
 func (db *DB) pragmas() (map[string]any, error) {
 	pragmaNames := []string{
 		"synchronous",

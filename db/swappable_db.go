@@ -175,6 +175,13 @@ func (s *SwappableDB) StmtReadOnly(sql string) (bool, error) {
 	return s.db.StmtReadOnly(sql)
 }
 
+// StmtMetadata calls StmtMetadata on the underlying database.
+func (s *SwappableDB) StmtMetadata(sql string) (StmtMetadata, error) {
+	s.dbMu.RLock()
+	defer s.dbMu.RUnlock()
+	return s.db.StmtMetadata(sql)
+}
+
 // Optimize calls Optimize on the underlying database.
 func (s *SwappableDB) Optimize() error {
 	s.dbMu.RLock()

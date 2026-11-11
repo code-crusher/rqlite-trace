@@ -72,6 +72,10 @@ type Store interface {
 
 	// Backup writes a consistent snapshot of the underlying database to dst.
 	Backup(ctx context.Context, br *proto.BackupRequest, dst io.Writer) (int, error)
+
+	// StmtMetadata returns metadata about the given SQL statement, without
+	// executing it.
+	StmtMetadata(sql string) (db.StmtMetadata, error)
 }
 
 // GetNodeMetaer is the interface that wraps the GetNodeMeta method.
@@ -192,6 +196,7 @@ const (
 	numSnapshots                      = "user_snapshots"
 	numReaps                          = "user_reaps"
 	numSQLAnalyze                     = "sql_analyze"
+	numMetadata                       = "metadata"
 	numAuthOK                         = "auth_ok"
 	numAuthFail                       = "auth_fail"
 	numTLSCertFetched                 = "tls_cert_fetched"
@@ -266,6 +271,7 @@ func ResetStats() {
 	stats.Add(numSnapshots, 0)
 	stats.Add(numReaps, 0)
 	stats.Add(numSQLAnalyze, 0)
+	stats.Add(numMetadata, 0)
 	stats.Add(numAuthOK, 0)
 	stats.Add(numAuthFail, 0)
 	stats.Add(numTLSCertFetched, 0)
@@ -502,6 +508,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/db/sql"):
 		stats.Add(numSQLAnalyze, 1)
 		s.handleSQLAnalyze(w, r, params)
+	case strings.HasPrefix(r.URL.Path, "/db/metadata"):
+		stats.Add(numMetadata, 1)
+		s.handleMetadata(w, r, params)
 	case r.URL.Path == "/boot":
 		stats.Add(numBoot, 1)
 		s.handleBoot(w, r)
@@ -796,6 +805,59 @@ func (s *Service) handleSQLAnalyze(w http.ResponseWriter, r *http.Request, qp Qu
 		results[i] = r
 	}
 	resp := &sqlAnalyzeResponse{Results: results, start: startT}
+	s.writeResponse(w, qp, resp)
+}
+
+// handleMetadata handles requests for SQL statement metadata. The statements
+// are never executed, so the metadata describes them without changing the
+// database.
+func (s *Service) handleMetadata(w http.ResponseWriter, r *http.Request, qp QueryParams) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	startT := time.Now()
+
+	if !s.CheckRequestPerm(r, auth.PermQuery) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method != "GET" && r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var stmts []*proto.Statement
+	if r.Method == "GET" {
+		q := qp.Query()
+		if q == "" {
+			http.Error(w, "query not specified", http.StatusBadRequest)
+			return
+		}
+		stmts = []*proto.Statement{{Sql: q}}
+	} else {
+		var err error
+		stmts, err = ParseRequest(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	results := make([]sqlMetadataStmtResult, len(stmts))
+	for i, stmt := range stmts {
+		// Always include the parameters, as an empty list if the statement
+		// takes none or could not be prepared.
+		results[i] = sqlMetadataStmtResult{Original: stmt.Sql, Parameters: []string{}}
+		md, err := s.store.StmtMetadata(stmt.Sql)
+		if err != nil {
+			results[i].Error = err.Error()
+			continue
+		}
+		results[i].ReadOnly = md.ReadOnly
+		if md.Parameters != nil {
+			results[i].Parameters = md.Parameters
+		}
+	}
+	resp := &sqlMetadataResponse{Results: results, start: startT}
 	s.writeResponse(w, qp, resp)
 }
 
@@ -2138,6 +2200,23 @@ type sqlAnalyzeResponse struct {
 	Results []sqlAnalyzeStmtResult `json:"results"`
 	Time    float64                `json:"time,omitempty"`
 	start   time.Time
+}
+
+type sqlMetadataStmtResult struct {
+	Original   string   `json:"original"`
+	ReadOnly   bool     `json:"read_only"`
+	Parameters []string `json:"parameters"`
+	Error      string   `json:"error,omitempty"`
+}
+
+type sqlMetadataResponse struct {
+	Results []sqlMetadataStmtResult `json:"results"`
+	Time    float64                 `json:"time,omitempty"`
+	start   time.Time
+}
+
+func (r *sqlMetadataResponse) SetTime() {
+	r.Time = time.Since(r.start).Seconds()
 }
 
 func (r *sqlAnalyzeResponse) SetTime() {
