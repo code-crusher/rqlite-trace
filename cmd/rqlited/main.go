@@ -514,7 +514,7 @@ func startHTTPService(cfg *Config, str *store.Store, cltr *cluster.Client, credS
 	if credStr != nil {
 		cs = credStr
 	}
-	s := httpd.New(cfg.HTTPAddr, str, cltr, pxy, cs)
+	s := httpd.New(cfg.HTTPAddrs, str, cltr, pxy, cs)
 
 	s.CACertFile = cfg.HTTPx509CACert
 	s.CertFile = cfg.HTTPx509Cert

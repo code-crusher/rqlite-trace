@@ -19,7 +19,7 @@ import (
 func Test_BackupOK_Local(t *testing.T) {
 	m := &MockStore{}
 	c := &mockClusterService{}
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
 	}
@@ -58,7 +58,7 @@ func Test_BackupOK_Remote(t *testing.T) {
 		leaderAddr: "foo:1234",
 	}
 	c := &mockClusterService{}
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
 	}
@@ -99,7 +99,7 @@ func Test_BackupOK_Remote(t *testing.T) {
 func Test_BackupStreamError_Local(t *testing.T) {
 	m := &MockStore{}
 	c := &mockClusterService{}
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
 	}
@@ -139,7 +139,7 @@ func Test_BackupStreamError_Remote(t *testing.T) {
 		leaderAddr: "foo:1234",
 	}
 	c := &mockClusterService{}
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
 	}
@@ -179,7 +179,7 @@ func Test_BackupStreamError_Remote(t *testing.T) {
 func Test_BackupVacuumSet(t *testing.T) {
 	m := &MockStore{}
 	c := &mockClusterService{}
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
 	}
@@ -223,7 +223,7 @@ func Test_BackupFlagsNoLeaderRedirect(t *testing.T) {
 		apiAddr: "http://1.2.3.4:999",
 	}
 
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
@@ -261,7 +261,7 @@ func Test_BackupFlagsNoLeaderRemoteFetch(t *testing.T) {
 		apiAddr: "http://1.2.3.4:999",
 	}
 
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
@@ -307,7 +307,7 @@ func Test_BackupFlagsNoLeaderOK(t *testing.T) {
 		apiAddr: "http://1.2.3.4:999",
 	}
 
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
@@ -341,7 +341,7 @@ func Test_BackupFlagsInvalid(t *testing.T) {
 		apiAddr: "http://1.2.3.4:999",
 	}
 
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
@@ -371,7 +371,7 @@ func Test_BackupFlagsInvalid(t *testing.T) {
 func Test_BackupDeleteOK(t *testing.T) {
 	m := &MockStore{}
 	c := &mockClusterService{}
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
 	}
@@ -409,7 +409,7 @@ func Test_BackupDeleteOK(t *testing.T) {
 func Test_BackupTablesOK(t *testing.T) {
 	m := &MockStore{}
 	c := &mockClusterService{}
-	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	s := New([]string{"127.0.0.1:0"}, m, c, proxy.New(m, c), nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("failed to start service")
 	}

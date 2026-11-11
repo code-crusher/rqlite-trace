@@ -275,8 +275,8 @@ func ResetStats() {
 type Service struct {
 	httpServer http.Server
 	closeCh    chan struct{}
-	addr       string       // Bind address of the HTTP service.
-	ln         net.Listener // Service listener
+	addrs      []string       // Bind addresses of the HTTP service.
+	lns        []net.Listener // Service listeners
 
 	uiHandler http.Handler
 
@@ -323,9 +323,9 @@ type Service struct {
 
 // New returns an uninitialized HTTP service. If credentials is nil, then
 // the service performs no authentication and authorization checks.
-func New(addr string, store Store, cluster Cluster, pxy *proxy.Proxy, credentials CredentialStore) *Service {
+func New(addrs []string, store Store, cluster Cluster, pxy *proxy.Proxy, credentials CredentialStore) *Service {
 	s := &Service{
-		addr:                addr,
+		addrs:               addrs,
 		store:               store,
 		proxy:               pxy,
 		DefaultQueueCap:     1024,
@@ -348,14 +348,16 @@ func (s *Service) Start() error {
 		Handler: s,
 	}
 
-	var ln net.Listener
+	if len(s.addrs) == 0 {
+		return errors.New("no HTTP bind addresses configured")
+	}
+	// Reset any listeners from a previous run, so that a Service can be
+	// restarted after Close.
+	s.lns = nil
+
+	var tlsConfig *tls.Config
 	var err error
-	if s.CertFile == "" || s.KeyFile == "" {
-		ln, err = net.Listen("tcp", s.addr)
-		if err != nil {
-			return err
-		}
-	} else {
+	if s.CertFile != "" && s.KeyFile != "" {
 		mTLSState := rtls.MTLSStateDisabled
 		if s.ClientVerify {
 			mTLSState = rtls.MTLSStateEnabled
@@ -375,10 +377,8 @@ func (s *Service) Start() error {
 		if err != nil {
 			return err
 		}
-		ln, err = tls.Listen("tcp", s.addr, s.tlsConfig)
-		if err != nil {
-			return err
-		}
+		tlsConfig = s.tlsConfig
+
 		var b strings.Builder
 		b.WriteString(fmt.Sprintf("secure HTTPS server enabled with cert %s, key %s", s.CertFile, s.KeyFile))
 		if s.CACertFile != "" {
@@ -394,7 +394,25 @@ func (s *Service) Start() error {
 		}
 		s.logger.Println(b.String())
 	}
-	s.ln = ln
+
+	// Create a listener for each configured bind address. If any listener
+	// cannot be created, close those already created and return the error.
+	for _, addr := range s.addrs {
+		var ln net.Listener
+		if tlsConfig == nil {
+			ln, err = net.Listen("tcp", addr)
+		} else {
+			ln, err = tls.Listen("tcp", addr, tlsConfig)
+		}
+		if err != nil {
+			for _, l := range s.lns {
+				l.Close()
+			}
+			s.lns = nil
+			return err
+		}
+		s.lns = append(s.lns, ln)
+	}
 
 	s.closeCh = make(chan struct{})
 	s.queueDone = make(chan struct{})
@@ -404,20 +422,26 @@ func (s *Service) Start() error {
 	s.logger.Printf("execute queue processing started with capacity %d, batch size %d, timeout %s",
 		s.DefaultQueueCap, s.DefaultQueueBatchSz, s.DefaultQueueTimeout.String())
 
-	go func() {
-		err := s.httpServer.Serve(s.ln)
-		if err != nil {
-			s.logger.Printf("HTTP service on %s stopped: %s", s.ln.Addr().String(), err.Error())
-		}
-	}()
-	s.logger.Println("service listening on", s.Addr())
+	for _, ln := range s.lns {
+		go func(ln net.Listener) {
+			err := s.httpServer.Serve(ln)
+			if err != nil {
+				s.logger.Printf("HTTP service on %s stopped: %s", ln.Addr().String(), err.Error())
+			}
+		}(ln)
+	}
+	for _, addr := range s.Addrs() {
+		s.logger.Println("service listening on", addr.String())
+	}
 
 	return nil
 }
 
 // Close closes the service.
 func (s *Service) Close() {
-	s.logger.Println("closing HTTP service on", s.ln.Addr().String())
+	for _, ln := range s.lns {
+		s.logger.Println("closing HTTP service on", ln.Addr().String())
+	}
 	if err := s.httpServer.Close(); err != nil {
 		s.logger.Println("HTTP service close error:", err.Error())
 	}
@@ -1814,9 +1838,22 @@ func (s *Service) handlePprof(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Addr returns the address on which the Service is listening
+// Addr returns the address on which the Service is listening. If the Service
+// is listening on more than one address, the first address is returned.
 func (s *Service) Addr() net.Addr {
-	return s.ln.Addr()
+	if len(s.lns) == 0 {
+		return nil
+	}
+	return s.lns[0].Addr()
+}
+
+// Addrs returns the addresses on which the Service is listening.
+func (s *Service) Addrs() []net.Addr {
+	addrs := make([]net.Addr, len(s.lns))
+	for i, ln := range s.lns {
+		addrs[i] = ln.Addr()
+	}
+	return addrs
 }
 
 // DoRedirect checks if the request is a redirect, and if so, performs the redirect.

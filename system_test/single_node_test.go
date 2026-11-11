@@ -1910,7 +1910,7 @@ func Test_SingleNodeAutoRestore(t *testing.T) {
 	clstrDialer := tcp.NewDialer(cluster.MuxClusterHeader, nil)
 	clstrClient := cluster.NewClient(clstrDialer, 30*time.Second)
 	pxy := proxy.New(node.Store, clstrClient)
-	node.Service = httpd.New("localhost:0", node.Store, clstrClient, pxy, nil)
+	node.Service = httpd.New([]string{"localhost:0"}, node.Store, clstrClient, pxy, nil)
 
 	if err := node.Service.Start(); err != nil {
 		t.Fatalf("failed to start HTTP server: %s", err.Error())
