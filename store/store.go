@@ -28,6 +28,7 @@ import (
 	"github.com/rqlite/rqlite/v10/command"
 	"github.com/rqlite/rqlite/v10/command/chunking"
 	"github.com/rqlite/rqlite/v10/command/proto"
+	sqlparser "github.com/rqlite/rqlite/v10/command/sql"
 	sql "github.com/rqlite/rqlite/v10/db"
 	"github.com/rqlite/rqlite/v10/db/humanize"
 	"github.com/rqlite/rqlite/v10/internal/fsutil"
@@ -1609,6 +1610,10 @@ func (s *Store) Query(ctx context.Context, qr *proto.QueryRequest) (rows []*prot
 		return nil, 0, 0, ErrStaleRead
 	}
 
+	// Queries that don't go through the Raft log are interpolated with the
+	// latest index this node has applied, so statements containing the Raft
+	// index placeholder read the state the node is actually aware of.
+	sqlparser.InterpolateRaftIndex(qr.Request.GetStatements(), s.AppliedIndex())
 	rows, err := s.db.QueryWithContext(ctx, qr.Request, qr.Timings)
 	return rows, level, 0, err
 }
@@ -1695,6 +1700,7 @@ func (s *Store) Request(ctx context.Context, eqr *proto.ExecuteQueryRequest) ([]
 				return nil, 0, 0, ErrNotLeader
 			}
 		}
+		sqlparser.InterpolateRaftIndex(eqr.Request.GetStatements(), s.AppliedIndex())
 		qr, err := s.db.QueryWithContext(ctx, eqr.Request, eqr.Timings)
 		return convertFn(qr), uint64(nRW), 0, err
 	}
@@ -2587,7 +2593,7 @@ func (s *Store) fsmApply(l *raft.Log) (e any) {
 				}
 			}()
 		}
-		return s.cmdProc.Process(l.Data, s.db)
+		return s.cmdProc.Process(l.Data, l.Index, s.db)
 	}()
 	if err != nil {
 		s.logger.Fatalf("fatal error applying command at index %d - aborting to prevent divergence between nodes: %s", l.Index, err)

@@ -42,7 +42,8 @@ func ResetStats() {
 // equivalent datetime(), date() and time() calls on that Julian day. If a statement
 // contains a RETURNING clause, the statement is marked as a query, so that the
 // result set can be returned to the client. If a statement is an EXPLAIN, it is
-// marked as such.
+// marked as such. Any Raft index placeholder is left untouched, since it is
+// interpolated when the statement is applied.
 func Process(stmts []*proto.Statement, rwrand, rwtime bool) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {

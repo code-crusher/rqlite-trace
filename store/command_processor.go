@@ -8,6 +8,7 @@ import (
 	"github.com/rqlite/rqlite/v10/command"
 	"github.com/rqlite/rqlite/v10/command/chunking"
 	"github.com/rqlite/rqlite/v10/command/proto"
+	sqlparser "github.com/rqlite/rqlite/v10/command/sql"
 	sql "github.com/rqlite/rqlite/v10/db"
 	"github.com/rqlite/rqlite/v10/internal/fsutil"
 )
@@ -41,11 +42,13 @@ func NewCommandProcessor(logger *log.Logger, dm *chunking.DechunkerManager) *Com
 		decMgmr: dm}
 }
 
-// Process processes the given command against the given database.
+// Process processes the given command against the given database. idx is
+// the Raft log index the command is being applied at; it is interpolated
+// into any statement containing the Raft index placeholder.
 // A non-nil error means the command could not safely be applied and the caller
 // must stop applying commands. The other return values must not be used in that
 // case. Ordinary SQL and operation errors are carried in the response.
-func (c *CommandProcessor) Process(data []byte, db *sql.SwappableDB) (*proto.Command, bool, any, error) {
+func (c *CommandProcessor) Process(data []byte, idx uint64, db *sql.SwappableDB) (*proto.Command, bool, any, error) {
 	cmd := &proto.Command{}
 	if err := command.Unmarshal(data, cmd); err != nil {
 		return nil, false, nil, fmt.Errorf("failed to unmarshal cluster command: %w", err)
@@ -57,6 +60,7 @@ func (c *CommandProcessor) Process(data []byte, db *sql.SwappableDB) (*proto.Com
 		if err := command.UnmarshalSubCommand(cmd, &qr); err != nil {
 			return cmd, false, nil, fmt.Errorf("failed to unmarshal query subcommand: %w", err)
 		}
+		sqlparser.InterpolateRaftIndex(qr.Request.GetStatements(), idx)
 		r, err := db.Query(qr.Request, qr.Timings)
 		return cmd, false, &fsmQueryResponse{rows: r, error: err}, nil
 	case proto.Command_COMMAND_TYPE_EXECUTE:
@@ -64,6 +68,7 @@ func (c *CommandProcessor) Process(data []byte, db *sql.SwappableDB) (*proto.Com
 		if err := command.UnmarshalSubCommand(cmd, &er); err != nil {
 			return cmd, false, nil, fmt.Errorf("failed to unmarshal execute subcommand: %w", err)
 		}
+		sqlparser.InterpolateRaftIndex(er.Request.GetStatements(), idx)
 		r, err := db.Execute(er.Request, er.Timings)
 		if _, ok := err.(*sql.FatalError); ok {
 			return cmd, false, nil, err
@@ -74,6 +79,7 @@ func (c *CommandProcessor) Process(data []byte, db *sql.SwappableDB) (*proto.Com
 		if err := command.UnmarshalSubCommand(cmd, &eqr); err != nil {
 			return cmd, false, nil, fmt.Errorf("failed to unmarshal execute-query subcommand: %w", err)
 		}
+		sqlparser.InterpolateRaftIndex(eqr.Request.GetStatements(), idx)
 		r, err := db.Request(eqr.Request, eqr.Timings)
 		if _, ok := err.(*sql.FatalError); ok {
 			return cmd, false, nil, err

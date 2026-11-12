@@ -108,7 +108,7 @@ func Test_CommandProcessor_FatalError(t *testing.T) {
 			processor := NewCommandProcessor(log.New(io.Discard, "", 0), nil)
 			process := func(statement string) *fsmExecuteQueryResponse {
 				t.Helper()
-				_, _, response, err := processor.Process(mustMarshalWriteCommand(t, cmdType, statement), db)
+				_, _, response, err := processor.Process(mustMarshalWriteCommand(t, cmdType, statement), 1, db)
 				if err != nil {
 					t.Fatalf("unexpected application error: %v", err)
 				}
@@ -140,7 +140,7 @@ func Test_CommandProcessor_FatalError(t *testing.T) {
 				t.Fatalf("setting page limit failed: %+v", response)
 			}
 			_, _, _, err = processor.Process(mustMarshalWriteCommand(t, cmdType,
-				"INSERT INTO data VALUES (2, zeroblob(1048576))"), db)
+				"INSERT INTO data VALUES (2, zeroblob(1048576))"), 1, db)
 			var fatal *sql.FatalError
 			var sqliteErr sqlite3.Error
 			if !errors.As(err, &fatal) || !errors.As(err, &sqliteErr) || sqliteErr.Code != sqlite3.ErrFull {
@@ -155,7 +155,7 @@ func Test_CommandProcessor_FatalError(t *testing.T) {
 func Test_CommandProcessor_MalformedCommand(t *testing.T) {
 	processor := NewCommandProcessor(log.New(io.Discard, "", 0), nil)
 	invalid := []byte{0xff}
-	if _, _, _, err := processor.Process(invalid, nil); err == nil {
+	if _, _, _, err := processor.Process(invalid, 1, nil); err == nil {
 		t.Fatal("expected malformed command error")
 	}
 	for _, cmdType := range []proto.Command_Type{
@@ -168,7 +168,7 @@ func Test_CommandProcessor_MalformedCommand(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, _, _, err := processor.Process(data, nil); err == nil {
+			if _, _, _, err := processor.Process(data, 1, nil); err == nil {
 				t.Fatal("expected malformed subcommand error")
 			}
 		})
@@ -224,4 +224,70 @@ func mustMarshalWriteCommand(t *testing.T, cmdType proto.Command_Type, statement
 		t.Fatal(err)
 	}
 	return data
+}
+
+// Test_CommandProcessor_RaftIndexInterpolation verifies that the Raft index
+// placeholder is replaced with the index the command is processed at.
+func Test_CommandProcessor_RaftIndexInterpolation(t *testing.T) {
+	db, err := sql.OpenSwappable(filepath.Join(t.TempDir(), "test.db"), sql.NewConfig(sql.ConnConfig{}, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	processor := NewCommandProcessor(log.New(io.Discard, "", 0), nil)
+	if _, _, _, err := processor.Process(mustMarshalWriteCommand(t,
+		proto.Command_COMMAND_TYPE_EXECUTE,
+		"CREATE TABLE foo (id INTEGER, log_idx INTEGER)"), 1, db); err != nil {
+		t.Fatalf("unexpected application error: %v", err)
+	}
+
+	for _, cmdType := range []proto.Command_Type{
+		proto.Command_COMMAND_TYPE_EXECUTE, proto.Command_COMMAND_TYPE_EXECUTE_QUERY,
+	} {
+		t.Run(cmdType.String(), func(t *testing.T) {
+			data := mustMarshalWriteCommand(t, cmdType,
+				"INSERT INTO foo (id, log_idx) VALUES (1, __RQLITE_RAFT_INDEX__)")
+			if _, _, _, err := processor.Process(data, 42, db); err != nil {
+				t.Fatalf("unexpected application error: %v", err)
+			}
+			rows, err := db.QueryStringStmt("SELECT log_idx FROM foo")
+			if err != nil {
+				t.Fatalf("failed to query: %v", err)
+			}
+			if exp, got := int64(42), rows[0].Values[0].Parameters[0].GetI(); exp != got {
+				t.Fatalf("expected log_idx %d, got %d", exp, got)
+			}
+		})
+	}
+
+	// Strong queries go through the Raft log too, so the placeholder is
+	// interpolated with the log index the query is applied at.
+	sub, compressed, err := command.NewRequestMarshaler().Marshal(&proto.QueryRequest{
+		Request: &proto.Request{Statements: []*proto.Statement{
+			{Sql: "SELECT COUNT(*) FROM foo WHERE log_idx <= __RQLITE_RAFT_INDEX__"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := command.Marshal(&proto.Command{
+		Type:       proto.Command_COMMAND_TYPE_QUERY,
+		SubCommand: sub,
+		Compressed: compressed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, resp, err := processor.Process(data, 42, db)
+	if err != nil {
+		t.Fatalf("unexpected application error: %v", err)
+	}
+	qr, ok := resp.(*fsmQueryResponse)
+	if !ok || qr.error != nil || len(qr.rows) != 1 || qr.rows[0].Error != "" {
+		t.Fatalf("unexpected strong query response: %+v", resp)
+	}
+	if exp, got := int64(2), qr.rows[0].Values[0].Parameters[0].GetI(); exp != got {
+		t.Fatalf("expected count %d, got %d", exp, got)
+	}
 }

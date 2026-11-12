@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"expvar"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -2324,5 +2325,78 @@ func Test_MultiNodeRequest_AutoLevel(t *testing.T) {
 		false, false, false)
 	if _, _, _, err := s1.Request(context.Background(), eqr); !errors.Is(err, ErrNotLeader) {
 		t.Fatalf("expected ErrNotLeader for AUTO request on follower, got: %v", err)
+	}
+}
+
+// Test_MultiNodeRaftIndexInterpolation verifies that the Raft index
+// placeholder is interpolated identically on the leader and on followers
+// as the log is replicated, so a follower can serve sequentially-consistent
+// queries using the latest index it has applied.
+func Test_MultiNodeRaftIndexInterpolation(t *testing.T) {
+	s0, ln := mustNewStore(t)
+	defer ln.Close()
+	if err := s0.Open(); err != nil {
+		t.Fatalf("failed to open single-node store: %s", err.Error())
+	}
+	defer s0.Close(true)
+	if err := s0.Bootstrap(NewServer(s0.ID(), s0.Addr(), true)); err != nil {
+		t.Fatalf("failed to bootstrap single-node store: %s", err.Error())
+	}
+	if _, err := s0.WaitForLeader(10 * time.Second); err != nil {
+		t.Fatalf("Error waiting for leader: %s", err)
+	}
+
+	s1, ln1 := mustNewStore(t)
+	defer ln1.Close()
+	if err := s1.Open(); err != nil {
+		t.Fatalf("failed to open single-node store: %s", err.Error())
+	}
+	defer s1.Close(true)
+	if err := s0.Join(joinRequest(s1.ID(), s1.Addr(), true)); err != nil {
+		t.Fatalf("failed to join single-node store: %s", err.Error())
+	}
+	if _, err := s1.WaitForLeader(10 * time.Second); err != nil {
+		t.Fatalf("Error waiting for leader: %s", err)
+	}
+
+	er := executeRequestFromString(`CREATE TABLE foo (id INTEGER, log_idx INTEGER)`, false, false)
+	if _, _, err := s0.Execute(context.Background(), er); err != nil {
+		t.Fatalf("failed to execute on leader: %s", err.Error())
+	}
+
+	// Write on the leader, recording the Raft index the statement is
+	// applied under.
+	er = executeRequestFromString(`INSERT INTO foo (id, log_idx) VALUES (1, __RQLITE_RAFT_INDEX__)`, false, false)
+	_, idx, err := s0.Execute(context.Background(), er)
+	if err != nil {
+		t.Fatalf("failed to execute on leader: %s", err.Error())
+	}
+
+	// Wait for the follower to have applied the write.
+	testPoll(t, func() bool {
+		return idx <= s1.DBAppliedIndex()
+	}, 100*time.Millisecond, 10*time.Second)
+
+	// The follower must have recorded the same index as the leader.
+	qr := queryRequestFromString(`SELECT log_idx FROM foo WHERE id = 1`, false, false, false)
+	qr.Level = proto.ConsistencyLevel_NONE
+	rows, _, _, err := s1.Query(context.Background(), qr)
+	if err != nil {
+		t.Fatalf("failed to query follower: %s", err.Error())
+	}
+	if exp, got := fmt.Sprintf(`[{"columns":["log_idx"],"types":["integer"],"values":[[%d]]}]`, idx), asJSON(rows); exp != got {
+		t.Fatalf("unexpected results for follower query\nexp: %s\ngot: %s", exp, got)
+	}
+
+	// The follower can serve a query interpolated with its own applied
+	// index, seeing everything it is aware of.
+	qr = queryRequestFromString(`SELECT COUNT(*) FROM foo WHERE log_idx <= __RQLITE_RAFT_INDEX__`, false, false, false)
+	qr.Level = proto.ConsistencyLevel_NONE
+	rows, _, _, err = s1.Query(context.Background(), qr)
+	if err != nil {
+		t.Fatalf("failed to query follower: %s", err.Error())
+	}
+	if exp, got := `[{"columns":["COUNT(*)"],"types":["integer"],"values":[[1]]}]`, asJSON(rows); exp != got {
+		t.Fatalf("unexpected results for follower query\nexp: %s\ngot: %s", exp, got)
 	}
 }

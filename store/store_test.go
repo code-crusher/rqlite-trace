@@ -334,6 +334,77 @@ func Test_SingleNodeDBAppliedIndex_RequestReturning(t *testing.T) {
 	}
 }
 
+// Test_SingleNodeRaftIndexInterpolation verifies that statements containing
+// the Raft index placeholder record the Raft log index the statement was
+// applied under, and that queries containing the placeholder are
+// interpolated with the latest applied index.
+func Test_SingleNodeRaftIndexInterpolation(t *testing.T) {
+	s, ln := mustNewStore(t)
+	defer ln.Close()
+	if err := s.Open(); err != nil {
+		t.Fatalf("failed to open single-node store: %s", err)
+	}
+	defer s.Close(true)
+	if err := s.Bootstrap(NewServer(s.ID(), s.Addr(), true)); err != nil {
+		t.Fatalf("failed to bootstrap single-node store: %s", err)
+	}
+	if _, err := s.WaitForLeader(10 * time.Second); err != nil {
+		t.Fatalf("error waiting for leader: %s", err)
+	}
+
+	er := executeRequestFromString(`CREATE TABLE foo (id INTEGER, log_idx INTEGER)`, false, false)
+	if _, _, err := s.Execute(context.Background(), er); err != nil {
+		t.Fatalf("failed to create table: %s", err)
+	}
+
+	// Insert a row recording the Raft index the statement is applied at. The
+	// index returned by Execute must be the index the placeholder was
+	// interpolated with.
+	er = executeRequestFromString(`INSERT INTO foo (id, log_idx) VALUES (1, __RQLITE_RAFT_INDEX__)`, false, false)
+	_, idx, err := s.Execute(context.Background(), er)
+	if err != nil {
+		t.Fatalf("failed to insert: %s", err)
+	}
+	qr := queryRequestFromString(`SELECT log_idx FROM foo WHERE id = 1`, false, false, false)
+	rows, _, _, err := s.Query(context.Background(), qr)
+	if err != nil {
+		t.Fatalf("failed to query: %s", err)
+	}
+	if exp, got := fmt.Sprintf(`[{"columns":["log_idx"],"types":["integer"],"values":[[%d]]}]`, idx), asJSON(rows); exp != got {
+		t.Fatalf("unexpected results\nexp: %s\ngot: %s", exp, got)
+	}
+
+	// A query containing the placeholder is interpolated with the node's
+	// applied index, returning everything the node is aware of.
+	qr = queryRequestFromString(`SELECT COUNT(*) FROM foo WHERE log_idx <= __RQLITE_RAFT_INDEX__`, false, false, false)
+	rows, _, _, err = s.Query(context.Background(), qr)
+	if err != nil {
+		t.Fatalf("failed to query: %s", err)
+	}
+	if exp, got := `[{"columns":["COUNT(*)"],"types":["integer"],"values":[[1]]}]`, asJSON(rows); exp != got {
+		t.Fatalf("unexpected results\nexp: %s\ngot: %s", exp, got)
+	}
+
+	// A statement whose placeholder is never interpolated would be a SQL
+	// error, so a second write confirms interpolation remains in effect.
+	er = executeRequestFromString(`INSERT INTO foo (id, log_idx) VALUES (2, __RQLITE_RAFT_INDEX__)`, false, false)
+	_, idx2, err := s.Execute(context.Background(), er)
+	if err != nil {
+		t.Fatalf("failed to insert: %s", err)
+	}
+	if idx2 <= idx {
+		t.Fatalf("expected increasing Raft indexes, got %d then %d", idx, idx2)
+	}
+	qr = queryRequestFromString(`SELECT log_idx FROM foo WHERE id = 2`, false, false, false)
+	rows, _, _, err = s.Query(context.Background(), qr)
+	if err != nil {
+		t.Fatalf("failed to query: %s", err)
+	}
+	if exp, got := fmt.Sprintf(`[{"columns":["log_idx"],"types":["integer"],"values":[[%d]]}]`, idx2), asJSON(rows); exp != got {
+		t.Fatalf("unexpected results\nexp: %s\ngot: %s", exp, got)
+	}
+}
+
 func Test_SingleNode_WaitForCommitIndex(t *testing.T) {
 	s, ln := mustNewStore(t)
 	defer ln.Close()

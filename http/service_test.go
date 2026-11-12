@@ -20,6 +20,7 @@ import (
 
 	cluster "github.com/rqlite/rqlite/v10/cluster/proto"
 	command "github.com/rqlite/rqlite/v10/command/proto"
+	"github.com/rqlite/rqlite/v10/command/sql"
 	"github.com/rqlite/rqlite/v10/proxy"
 	"github.com/rqlite/rqlite/v10/queue"
 	"github.com/rqlite/rqlite/v10/store"
@@ -3659,5 +3660,42 @@ func Test_ErrorsParam(t *testing.T) {
 	}
 	if got, exp := do("/db/query", q+"&errors=v1", false), `{"results":[{`+v1+`}]}`; got != exp {
 		t.Fatalf("GET /db/query errors=v1: exp %s, got %s", exp, got)
+	}
+}
+
+// Test_RaftIndexInterpolationPassThrough verifies that statements containing
+// the Raft index placeholder pass through HTTP-layer SQL processing intact,
+// since the placeholder is interpolated when the statement is applied.
+func Test_RaftIndexInterpolationPassThrough(t *testing.T) {
+	const token = sql.RaftIndexToken
+	var got string
+
+	m := &MockStore{}
+	m.executeFn = func(er *command.ExecuteRequest) ([]*command.ExecuteQueryResponse, uint64, error) {
+		got = er.Request.Statements[0].Sql
+		return nil, 0, nil
+	}
+	m.requestFn = func(eqr *command.ExecuteQueryRequest) ([]*command.ExecuteQueryResponse, uint64, uint64, error) {
+		return nil, 0, 0, nil
+	}
+	c := &mockClusterService{}
+	s := New("127.0.0.1:0", m, c, proxy.New(m, c), nil)
+	if err := s.Start(); err != nil {
+		t.Fatalf("failed to start service")
+	}
+	defer s.Close()
+	host := fmt.Sprintf("http://%s", s.Addr().String())
+
+	insert := fmt.Sprintf(`["INSERT INTO foo (id, log_idx) VALUES (1, %s)"]`, token)
+	resp, err := http.Post(host+"/db/execute", "application/json", strings.NewReader(insert))
+	if err != nil {
+		t.Fatalf("failed to make execute request: %s", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected StatusOK, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(got, token) {
+		t.Fatalf("execute request statement %q does not contain the Raft index token", got)
 	}
 }

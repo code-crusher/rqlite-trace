@@ -1,3 +1,7 @@
+## v10.8.0 (unreleased)
+### New features
+- Interpolate the Raft log index into statements using the `__RQLITE_RAFT_INDEX__` placeholder, so writes can record the log position they were committed at, enabling sequentially-consistent reads across replicas. Implements issue [#829](https://github.com/rqlite/rqlite/issues/829).
+
 ## v10.7.1 (November 9th 2026)
 This release is unchanged relative to v10.7.0 and simply fixes a Docker packaging issue.
 
