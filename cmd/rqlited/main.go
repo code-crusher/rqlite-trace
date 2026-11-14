@@ -180,10 +180,15 @@ func main() {
 		}
 	}
 
-	// Get any credential store.
+	// Get any credential store, and start dynamically reloading it if
+	// credential checking is enabled.
 	credStr, err := credentialStore(cfg)
 	if err != nil {
 		log.Fatalf("failed to get credential store: %s", err.Error())
+	}
+	credReloaderStop, err := startCredentialsReloader(cfg, credStr)
+	if err != nil {
+		log.Fatalf("failed to start credential store reloader: %s", err.Error())
 	}
 
 	// Create cluster service now, so nodes will be able to learn information about each other.
@@ -283,6 +288,9 @@ func main() {
 	// possible that the node is going away.
 	httpServ.Close()
 	clstrServ.Close()
+	if credReloaderStop != nil {
+		close(credReloaderStop)
+	}
 
 	if cfg.RaftClusterRemoveOnShutdown {
 		remover := cluster.NewRemover(clstrClient, 5*time.Second, str)
@@ -579,6 +587,20 @@ func credentialStore(cfg *Config) (*auth.CredentialsStore, error) {
 		return nil, nil
 	}
 	return auth.NewCredentialsStoreFromFile(cfg.AuthFile)
+}
+
+// startCredentialsReloader starts dynamically reloading the credentials file,
+// if credential checking is enabled, so that credential changes take effect
+// without a restart of the node. The returned channel stops the reloading.
+func startCredentialsReloader(cfg *Config, credStr *auth.CredentialsStore) (chan struct{}, error) {
+	if credStr == nil {
+		return nil, nil
+	}
+	credReloader, err := auth.NewCredentialsReloader(credStr, cfg.AuthFile)
+	if err != nil {
+		return nil, err
+	}
+	return credReloader.Start(0), nil
 }
 
 func clusterService(cfg *Config, ln net.Listener, db cluster.Database, mgr cluster.Manager, credStr *auth.CredentialsStore) (*cluster.Service, error) {

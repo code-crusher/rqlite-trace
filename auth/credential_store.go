@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 const (
@@ -64,7 +65,10 @@ type Credential struct {
 }
 
 // CredentialsStore stores authentication and authorization information for all users.
+// It is safe for concurrent use, so that a store can be reloaded, by any means,
+// while remaining in use by the rest of the system.
 type CredentialsStore struct {
+	mu    sync.RWMutex
 	store map[string]string
 	perms map[string]map[string]bool
 }
@@ -141,6 +145,8 @@ func (c *CredentialsStore) Load(r io.Reader) error {
 		return fmt.Errorf("unexpected data after credentials array: %v", tok)
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.store = pending.store
 	c.perms = pending.perms
 	return nil
@@ -148,6 +154,8 @@ func (c *CredentialsStore) Load(r io.Reader) error {
 
 // Check returns true if the password is correct for the given username.
 func (c *CredentialsStore) Check(username, password string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	pw, ok := c.store[username]
 	if !ok {
 		return false
@@ -157,6 +165,8 @@ func (c *CredentialsStore) Check(username, password string) bool {
 
 // Password returns the password for the given user.
 func (c *CredentialsStore) Password(username string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	pw, ok := c.store[username]
 	return pw, ok
 }
@@ -170,6 +180,8 @@ func (c *CredentialsStore) CheckRequest(b BasicAuther) bool {
 // HasPerm returns true if username has the given perm, either directly or
 // via AllUsers. It does not perform any password checking.
 func (c *CredentialsStore) HasPerm(username string, perm string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if m, ok := c.perms[username]; ok {
 		if _, ok := m[perm]; ok {
 			return true
