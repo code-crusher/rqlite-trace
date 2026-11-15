@@ -671,6 +671,17 @@ If communicating CDC updates to other nodes requires credentials you can tell a 
 default = ""
 
 [[flags]]
+name = "NotifyEndpoint"
+cli = "notify-endpoint"
+section = "Notifications"
+type = "string"
+short_help = "Set HTTP endpoint to be notified of leadership changes, or path to notification config file. If not set, notifications not enabled"
+long_help = """
+If the passed value is a valid HTTP(S) URL then leadership-change notifications will be posted to that endpoint. Otherwise the value is interpreted as the path to the notification configuration file. When the leadership status of the node changes, rqlite POSTs a JSON payload like {"node_id": "node1", "leader": true, "timestamp": "..."} to the endpoint.
+"""
+default = ""
+
+[[flags]]
 name = "OTLPEndpoint"
 cli = "otlp-endpoint"
 section = "Observability and profiling"

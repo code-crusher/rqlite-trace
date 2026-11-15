@@ -24,6 +24,7 @@ import (
 	"github.com/rqlite/rqlite/v10/cdc"
 	"github.com/rqlite/rqlite/v10/cluster"
 	"github.com/rqlite/rqlite/v10/cluster/disco"
+	"github.com/rqlite/rqlite/v10/cluster/notify"
 	"github.com/rqlite/rqlite/v10/cmd"
 	"github.com/rqlite/rqlite/v10/command"
 	"github.com/rqlite/rqlite/v10/db"
@@ -207,6 +208,13 @@ func main() {
 		}
 	}
 
+	// Create the notification Service, if requested, so that external systems
+	// can be notified of leadership changes.
+	notifyServ, err := createNotify(cfg, str)
+	if err != nil {
+		log.Fatalf("failed to create notification Service: %s", err.Error())
+	}
+
 	// Create the proxy and set its API address.
 	pxy := proxy.New(str, clstrClient)
 	pxy.SetAPIAddr(cfg.HTTPAdv)
@@ -230,6 +238,11 @@ func main() {
 	if cdcServ != nil {
 		if err := httpServ.RegisterStatus("cdc", cdcServ); err != nil {
 			log.Fatalf("failed to register cdc status provider: %s", err.Error())
+		}
+	}
+	if notifyServ != nil {
+		if err := httpServ.RegisterStatus("notify", notifyServ); err != nil {
+			log.Fatalf("failed to register notify status provider: %s", err.Error())
 		}
 	}
 	for n, r := range map[string]httpd.StatusReporter{
@@ -300,6 +313,13 @@ func main() {
 		log.Printf("stepping down as Leader before shutdown")
 		str.Stepdown(true, "")
 	}
+
+	// Stop the notification Service now that Raft-level leadership changes
+	// can no longer occur, so it can no longer attempt to notify.
+	if notifyServ != nil {
+		notifyServ.Stop()
+	}
+
 	muxLn.Close()
 
 	// Close the mux, which force-closes any in-flight node-to-node connections
@@ -416,6 +436,27 @@ func createCDC(cfg *Config, cdcCfg *cdc.Config, str *store.Store, clstrServ *clu
 		return nil, fmt.Errorf("failed to start CDC Service: %s", err.Error())
 	}
 	return cdcService, nil
+}
+
+// createNotify creates the notification Service, if configured. The Service
+// notifies a configured endpoint when the leadership status of this node
+// changes.
+func createNotify(cfg *Config, str *store.Store) (*notify.Service, error) {
+	if cfg.NotifyEndpoint == "" {
+		return nil, nil
+	}
+	notifyCfg, err := notify.NewConfig(cfg.NotifyEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create notification config: %s", err.Error())
+	}
+	notifyService, err := notify.NewService(str.ID(), str, notifyCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create notification Service: %s", err.Error())
+	}
+	if err := notifyService.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start notification Service: %s", err.Error())
+	}
+	return notifyService, nil
 }
 
 func createStore(cfg *Config, ln *tcp.Layer, extensions []string, cdcCfg *cdc.Config, queryLogger *querylog.QueryLogger) (*store.Store, error) {
