@@ -50,29 +50,34 @@ func (p *pool) poolStats() *PoolStats {
 }
 
 // busyTimeout returns the busy timeout of a connection from the pool.
-func (p *pool) busyTimeout() (int, error) {
-	conn, err := p.acquire(context.Background())
+// The context bounds how long to wait for a free connection and for the
+// query itself.
+func (p *pool) busyTimeout(ctx context.Context) (int, error) {
+	conn, err := p.acquire(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer conn.Close()
-	return conn.BusyTimeout()
+	return conn.BusyTimeout(ctx)
 }
 
 // pragmas reads the named pragmas on one connection from the pool.
-func (p *pool) pragmas(names []string) (map[string]string, error) {
-	conn, err := p.acquire(context.Background())
+// The context bounds how long to wait for a free connection and for the
+// queries themselves.
+func (p *pool) pragmas(ctx context.Context, names []string) (map[string]string, error) {
+	conn, err := p.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	return conn.pragmas(names)
+	return conn.pragmas(ctx, names)
 }
 
 // inTransaction returns whether a connection from the pool has a
-// transaction open.
-func (p *pool) inTransaction() (bool, error) {
-	conn, err := p.acquire(context.Background())
+// transaction open. The context bounds how long to wait for a free
+// connection.
+func (p *pool) inTransaction(ctx context.Context) (bool, error) {
+	conn, err := p.acquire(ctx)
 	if err != nil {
 		return false, err
 	}

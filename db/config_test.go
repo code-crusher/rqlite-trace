@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,7 +85,7 @@ func Test_OpenSwappable_ConfigReuse(t *testing.T) {
 		t.Fatalf("reader limit after swap: expected 2, got %d", got)
 	}
 	for role, pool := range map[string]*pool{"writer": &db.db.writer.pool, "readers": &db.db.readers.pool} {
-		pragmas, err := pool.pragmas([]string{"journal_mode", "foreign_keys"})
+		pragmas, err := pool.pragmas(context.Background(), []string{"journal_mode", "foreign_keys"})
 		if err != nil {
 			t.Fatal(err)
 		}

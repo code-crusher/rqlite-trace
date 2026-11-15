@@ -98,7 +98,7 @@ func Test_DB_BusyTimeout_AllReaders(t *testing.T) {
 	defer r2.Close()
 
 	for i, r := range []*Conn{r1, r2} {
-		got, err := r.BusyTimeout()
+		got, err := r.BusyTimeout(context.Background())
 		if err != nil {
 			t.Fatalf("failed to get busy_timeout on reader %d: %s", i+1, err.Error())
 		}
@@ -3325,4 +3325,41 @@ func mustCreateDumpSchemaFixture(t *testing.T) (*DB, string) {
 	mustExecute(db, `CREATE TRIGGER trg_t2 AFTER INSERT ON t2 BEGIN UPDATE t2 SET v = 'y' WHERE id = NEW.id; END`)
 	mustExecute(db, `CREATE VIEW v_t1_t2 AS SELECT a.id FROM t1 a JOIN t2 b ON a.id = b.id`)
 	return db, path
+}
+
+// Test_DBStats_TimesOutWhenWriterHeld verifies that Stats does not block
+// indefinitely when the single read-write connection is held by another
+// goroutine: the diagnostic queries are bounded, so Stats must return an
+// error within roughly the configured timeout instead of waiting forever.
+func Test_DBStats_TimesOutWhenWriterHeld(t *testing.T) {
+	db, path := mustCreateOnDiskDatabaseWAL()
+	defer fsutil.Remove(path)
+	defer db.Close()
+
+	mustExecute(db, `CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`)
+
+	ctx := context.Background()
+	conn, err := db.AcquireWriter(ctx)
+	if err != nil {
+		t.Fatalf("failed to acquire writer: %s", err)
+	}
+	defer conn.Close()
+
+	// Hold the writer in an open transaction so no writer is available.
+	if _, err := conn.Execute(ctx, &command.Request{Statements: []*command.Statement{
+		{Sql: "BEGIN"},
+		{Sql: `INSERT INTO foo(name) VALUES('fiona')`},
+	}}, false); err != nil {
+		t.Fatalf("failed to write on held writer: %s", err)
+	}
+
+	start := time.Now()
+	_, err = db.StatsWithTimeout(200 * time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error from StatsWithTimeout while the writer is held, got nil")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("StatsWithTimeout blocked for %s, want a bounded wait", elapsed)
+	}
 }

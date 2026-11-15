@@ -39,6 +39,11 @@ const (
 	bkDelay               = 50 * time.Millisecond
 	checkpointBusyTimeout = 250 * time.Millisecond
 	durToOpenLog          = 2 * time.Second
+
+	// statsTimeout bounds how long the diagnostic queries behind Stats wait
+	// for a connection and for SQLite to answer, so /status stays responsive
+	// when the database is busy.
+	statsTimeout = 2 * time.Second
 )
 
 const (
@@ -388,13 +393,26 @@ func (db *DB) Close() error {
 	return db.writer.close()
 }
 
-// Stats returns status and diagnostics for the database.
+// Stats returns status and diagnostics for the database. It is used by the
+// /status endpoint, so the diagnostic queries it runs are bounded by
+// statsTimeout: if the database is too busy to answer in time the call
+// returns an error rather than blocking the status endpoint indefinitely.
 func (db *DB) Stats() (map[string]any, error) {
-	copts, err := db.CompileOptions()
+	return db.StatsWithTimeout(statsTimeout)
+}
+
+// StatsWithTimeout is Stats with an explicit bound on how long the
+// diagnostic queries may take. A single deadline covers acquiring each
+// connection and running each query. Compile options are cached after the
+// first read, so they are only queried once.
+func (db *DB) StatsWithTimeout(timeout time.Duration) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	copts, err := db.compileOptions(ctx)
 	if err != nil {
 		return nil, err
 	}
-	memStats, err := db.memStats()
+	memStats, err := db.memStats(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -402,15 +420,15 @@ func (db *DB) Stats() (map[string]any, error) {
 		"ro": db.readers.poolStats(),
 		"rw": db.writer.poolStats(),
 	}
-	dbSz, err := db.Size()
+	dbSz, err := db.size(ctx)
 	if err != nil {
 		return nil, err
 	}
-	pragmas, err := db.pragmas()
+	pragmas, err := db.pragmas(ctx)
 	if err != nil {
 		return nil, err
 	}
-	txStatus, err := db.txStatus()
+	txStatus, err := db.txStatus(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -448,7 +466,12 @@ func (db *DB) Stats() (map[string]any, error) {
 // Size returns the size of the database in bytes. "Size" is defined as
 // page_count * schema.page_size.
 func (db *DB) Size() (int64, error) {
-	rows, err := db.QueryStringStmt(`SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()`)
+	return db.size(context.Background())
+}
+
+// size is Size bounded by ctx.
+func (db *DB) size(ctx context.Context) (int64, error) {
+	rows, err := db.queryStringStmt(ctx, `SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()`)
 	if err != nil {
 		return 0, err
 	}
@@ -492,13 +515,13 @@ func (db *DB) ExtensionNames() []string {
 // RWBusyTimeout returns the busy timeout, in milliseconds, of the read-write
 // database connection. It is set by the writer's ConnConfig.
 func (db *DB) RWBusyTimeout() (int, error) {
-	return db.writer.busyTimeout()
+	return db.writer.busyTimeout(context.Background())
 }
 
 // ROBusyTimeout returns the busy timeout, in milliseconds, of the read-only
 // database connections. It is set by the readers' ConnConfig.
 func (db *DB) ROBusyTimeout() (int, error) {
-	return db.readers.busyTimeout()
+	return db.readers.busyTimeout(context.Background())
 }
 
 // BusyTimeout returns the busy timeouts, in milliseconds, of the read-write
@@ -546,7 +569,7 @@ func (db *DB) CheckpointTruncateWithTimeout(dur time.Duration) (err error) {
 	}
 	defer conn.Close()
 
-	rwBt, err := conn.BusyTimeout()
+	rwBt, err := conn.BusyTimeout(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to get busy_timeout: %s", err.Error())
 	}
@@ -608,7 +631,7 @@ func (db *DB) CheckpointWithTimeout(mode CheckpointMode, dur time.Duration) (met
 	defer conn.Close()
 
 	if dur > 0 {
-		rwBt, err := conn.BusyTimeout()
+		rwBt, err := conn.BusyTimeout(context.Background())
 		if err != nil {
 			return nil, fmt.Errorf("failed to get busy_timeout on checkpointing connection: %s", err.Error())
 		}
@@ -805,12 +828,17 @@ var (
 
 // CompileOptions returns the SQLite compilation options.
 func (db *DB) CompileOptions() ([]string, error) {
+	return db.compileOptions(context.Background())
+}
+
+// compileOptions is CompileOptions bounded by ctx.
+func (db *DB) compileOptions(ctx context.Context) ([]string, error) {
 	compileOptionsMu.Lock()
 	defer compileOptionsMu.Unlock()
 	if compileOptions != nil {
 		return compileOptions, nil
 	}
-	res, err := db.QueryStringStmt("PRAGMA compile_options")
+	res, err := db.queryStringStmt(ctx, "PRAGMA compile_options")
 	if err != nil {
 		return nil, err
 	}
@@ -928,6 +956,12 @@ func (db *DB) ExecuteWithContext(ctx context.Context, req *command.Request, xTim
 
 // QueryStringStmt executes a single query that returns rows, but doesn't modify the database.
 func (db *DB) QueryStringStmt(query string) ([]*command.QueryRows, error) {
+	return db.queryStringStmt(context.Background(), query)
+}
+
+// queryStringStmt is QueryStringStmt bounded by ctx. The deadline bounds both
+// the wait for a reader and the execution of the query.
+func (db *DB) queryStringStmt(ctx context.Context, query string) ([]*command.QueryRows, error) {
 	r := &command.Request{
 		Statements: []*command.Statement{
 			{
@@ -935,7 +969,7 @@ func (db *DB) QueryStringStmt(query string) ([]*command.QueryRows, error) {
 			},
 		},
 	}
-	return db.Query(r, false)
+	return db.QueryWithContext(ctx, r, false)
 }
 
 // QueryStringStmtWithTimeout executes a single query that returns rows, but doesn't modify the database.
@@ -1161,7 +1195,7 @@ func (db *DB) StmtReadOnly(sql string) (bool, error) {
 	return conn.StmtReadOnly(sql)
 }
 
-func (db *DB) pragmas() (map[string]any, error) {
+func (db *DB) pragmas(ctx context.Context) (map[string]any, error) {
 	pragmaNames := []string{
 		"synchronous",
 		"journal_mode",
@@ -1170,11 +1204,11 @@ func (db *DB) pragmas() (map[string]any, error) {
 		"busy_timeout",
 	}
 
-	rw, err := db.writer.pragmas(pragmaNames)
+	rw, err := db.writer.pragmas(ctx, pragmaNames)
 	if err != nil {
 		return nil, err
 	}
-	ro, err := db.readers.pragmas(pragmaNames)
+	ro, err := db.readers.pragmas(ctx, pragmaNames)
 	if err != nil {
 		return nil, err
 	}
@@ -1183,19 +1217,19 @@ func (db *DB) pragmas() (map[string]any, error) {
 
 // txStatus returns whether there is an active transaction on each database
 // connection.
-func (db *DB) txStatus() (map[string]any, error) {
-	rw, err := db.writer.inTransaction()
+func (db *DB) txStatus(ctx context.Context) (map[string]any, error) {
+	rw, err := db.writer.inTransaction(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ro, err := db.readers.inTransaction()
+	ro, err := db.readers.inTransaction(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"rw": rw, "ro": ro}, nil
 }
 
-func (db *DB) memStats() (map[string]int64, error) {
+func (db *DB) memStats(ctx context.Context) (map[string]int64, error) {
 	ms := make(map[string]int64)
 	// Batch all PRAGMA queries into a single request to avoid acquiring
 	// a separate connection for each PRAGMA.
@@ -1215,7 +1249,7 @@ func (db *DB) memStats() (map[string]int64, error) {
 		}
 	}
 	req := &command.Request{Statements: stmts}
-	res, err := db.Query(req, false)
+	res, err := db.QueryWithContext(ctx, req, false)
 	if err != nil {
 		return nil, err
 	}

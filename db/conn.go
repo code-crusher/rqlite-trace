@@ -730,9 +730,9 @@ func (c *Conn) AutoCheckpoint() (int, error) {
 }
 
 // BusyTimeout returns the busy timeout of the connection, in milliseconds.
-func (c *Conn) BusyTimeout() (int, error) {
+func (c *Conn) BusyTimeout(ctx context.Context) (int, error) {
 	var ms int
-	err := c.conn.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&ms)
+	err := c.conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&ms)
 	return ms, err
 }
 
@@ -775,11 +775,11 @@ func (c *Conn) InTransaction() (bool, error) {
 }
 
 // pragmas reads the named pragmas on the connection.
-func (c *Conn) pragmas(names []string) (map[string]string, error) {
+func (c *Conn) pragmas(ctx context.Context, names []string) (map[string]string, error) {
 	m := make(map[string]string, len(names))
 	for _, p := range names {
 		var s string
-		if err := c.conn.QueryRowContext(context.Background(), fmt.Sprintf("PRAGMA %s", p)).Scan(&s); err != nil {
+		if err := c.conn.QueryRowContext(ctx, fmt.Sprintf("PRAGMA %s", p)).Scan(&s); err != nil {
 			return nil, err
 		}
 		m[p] = s
