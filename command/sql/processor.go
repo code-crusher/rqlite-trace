@@ -210,35 +210,46 @@ func (rw *Rewriter) Visit(node sql.Node) (w sql.Visitor, n sql.Node, err error) 
 		// If used, ensure the value is same for the duration of the statement
 		jd := julianDayAsNumberLit(rw.nowFn())
 
-		if rw.RewriteTime && len(n.Args) > 0 &&
-			(strings.EqualFold(n.Name.Name, "date") ||
-				strings.EqualFold(n.Name.Name, "time") ||
-				strings.EqualFold(n.Name.Name, "datetime") ||
-				strings.EqualFold(n.Name.Name, "julianday") ||
-				strings.EqualFold(n.Name.Name, "unixepoch")) {
+		name := strings.ToLower(n.Name.Name)
+		switch {
+		case rw.RewriteTime && (name == "date" || name == "time" || name == "datetime" ||
+			name == "julianday" || name == "unixepoch"):
+			// SQLite treats a missing time value as 'now', so datetime()
+			// evaluates against the wall clock just like datetime('now'),
+			// and if replicated as-is each node would see a different value.
+			// Rewrite both forms to the same fixed Julian day.
+			switch {
+			case len(n.Args) == 0:
+				n.Args = []sql.Expr{jd}
+				rw.modified = true
+			case isNow(n.Args[0]):
+				n.Args[0] = jd
+				rw.modified = true
+			}
+		case rw.RewriteTime && name == "strftime":
+			// strftime() with a single argument also defaults the time
+			// value to 'now'.
+			switch {
+			case len(n.Args) == 1:
+				n.Args = append(n.Args, jd)
+				rw.modified = true
+			case len(n.Args) > 1 && isNow(n.Args[1]):
+				n.Args[1] = jd
+				rw.modified = true
+			}
+		case rw.RewriteTime && name == "timediff" && len(n.Args) > 1:
 			if isNow(n.Args[0]) {
 				n.Args[0] = jd
-			}
-			rw.modified = true
-		} else if rw.RewriteTime && len(n.Args) > 1 &&
-			strings.EqualFold(n.Name.Name, "strftime") {
-			if isNow(n.Args[1]) {
-				n.Args[1] = jd
-			}
-			rw.modified = true
-		} else if rw.RewriteTime && len(n.Args) > 1 &&
-			strings.EqualFold(n.Name.Name, "timediff") {
-			if isNow(n.Args[0]) {
-				n.Args[0] = jd
+				rw.modified = true
 			}
 			if isNow(n.Args[1]) {
 				n.Args[1] = jd
+				rw.modified = true
 			}
-			rw.modified = true
-		} else if !rw.orderedBy && rw.RewriteRand && strings.EqualFold(n.Name.Name, "random") {
+		case !rw.orderedBy && rw.RewriteRand && name == "random":
 			retNode = &sql.NumberLit{Value: strconv.Itoa(int(rw.randFn()))}
 			rw.modified = true
-		} else if !rw.orderedBy && rw.RewriteRand && strings.EqualFold(n.Name.Name, "randomblob") {
+		case !rw.orderedBy && rw.RewriteRand && name == "randomblob":
 			if len(n.Args) == 1 {
 				lit, ok := n.Args[0].(*sql.NumberLit)
 				if !ok {

@@ -160,6 +160,69 @@ func Test_Rewriter_Time(t *testing.T) {
 		// CURRENT_TIMESTAMP, CURRENT_DATE and CURRENT_TIME are equivalent to
 		// datetime('now'), date('now') and time('now').
 		{
+			// SQLite defaults a missing time value to 'now', so these need
+			// to be rewritten too, otherwise every node evaluates them at
+			// a different moment.
+			in:          `INSERT INTO foo(col1) VALUES (time())`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (time(2440422.500000))`,
+			rewriteTime: true,
+			modified:    true,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (date())`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (date(2440422.500000))`,
+			rewriteTime: true,
+			modified:    true,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (datetime())`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (datetime(2440422.500000))`,
+			rewriteTime: true,
+			modified:    true,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (julianday())`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (julianday(2440422.500000))`,
+			rewriteTime: true,
+			modified:    true,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (unixepoch())`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (unixepoch(2440422.500000))`,
+			rewriteTime: true,
+			modified:    true,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (strftime('%Y-%m-%d'))`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (strftime('%Y-%m-%d', 2440422.500000))`,
+			rewriteTime: true,
+			modified:    true,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (time('now'))`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (time('now'))`,
+			rewriteTime: false,
+			modified:    false,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (time())`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (time())`,
+			rewriteTime: false,
+			modified:    false,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (time('2023-01-02 15:04:05'))`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (time('2023-01-02 15:04:05'))`,
+			rewriteTime: true,
+			modified:    false,
+		},
+		{
+			in:          `INSERT INTO foo(col1) VALUES (strftime('%Y'))`,
+			exp:         `INSERT INTO "foo" ("col1") VALUES (strftime('%Y'))`,
+			rewriteTime: false,
+			modified:    false,
+		},
+		{
 			in:          `INSERT INTO foo(col1) VALUES (CURRENT_TIMESTAMP)`,
 			exp:         `INSERT INTO "foo" ("col1") VALUES (CURRENT_TIMESTAMP)`,
 			rewriteTime: false,

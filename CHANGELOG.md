@@ -1,3 +1,7 @@
+## Unreleased
+### Implementation changes and bug fixes
+- Rewrite the zero-argument forms of the SQLite time functions (`date()`, `time()`, `datetime()`, `julianday()`, `unixepoch()`) and single-argument `strftime('...')` to their Julian-day equivalents before Raft replication, the same as the existing `'now'` handling. Previously these expressions were replicated verbatim, so each node evaluated them at a different wall-clock instant and replicas could diverge. Relates to issue [#1338](https://github.com/rqlite/rqlite/issues/1338).
+
 ## v10.7.1 (November 9th 2026)
 This release is unchanged relative to v10.7.0 and simply fixes a Docker packaging issue.
 

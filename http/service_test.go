@@ -3008,6 +3008,14 @@ func Test_SQLAnalyze_TimeFunctions(t *testing.T) {
 		{"time", `["INSERT INTO foo VALUES(time('now'))"]`, "time"},
 		{"julianday", `["INSERT INTO foo VALUES(julianday('now'))"]`, "julianday"},
 		{"unixepoch", `["INSERT INTO foo VALUES(unixepoch('now'))"]`, "unixepoch"},
+
+		// SQLite defaults a missing time value to 'now', so the
+		// zero-argument forms must be rewritten too.
+		{"datetime-noargs", `["INSERT INTO foo VALUES(datetime())"]`, "datetime"},
+		{"date-noargs", `["INSERT INTO foo VALUES(date())"]`, "date"},
+		{"time-noargs", `["INSERT INTO foo VALUES(time())"]`, "time"},
+		{"julianday-noargs", `["INSERT INTO foo VALUES(julianday())"]`, "julianday"},
+		{"unixepoch-noargs", `["INSERT INTO foo VALUES(unixepoch())"]`, "unixepoch"},
 	}
 
 	for _, tc := range testCases {
@@ -3048,6 +3056,28 @@ func Test_SQLAnalyze_Strftime(t *testing.T) {
 	rewritten := r["rewritten"].(string)
 	if !regexp.MustCompile(`strftime\('%Y-%m-%d', \d{7}\.\d+\)`).MatchString(rewritten) {
 		t.Fatalf("expected strftime 'now' to be replaced with Julian day, got: %s", rewritten)
+	}
+}
+
+func Test_SQLAnalyze_StrftimeOneArg(t *testing.T) {
+	host := newSQLAnalyzeHost(t)
+	client := &http.Client{}
+
+	// A single-argument strftime() defaults the time value to 'now', so it
+	// must be rewritten too.
+	resp, err := client.Post(host+"/db/sql", "application/json",
+		strings.NewReader(`["INSERT INTO foo VALUES(strftime('%Y-%m-%d'))"]`))
+	if err != nil {
+		t.Fatalf("failed to make request: %s", err)
+	}
+	defer resp.Body.Close()
+
+	r := mustGetFirstResult(t, mustReadBody(t, resp))
+
+	// strftime('%Y-%m-%d') -> strftime('%Y-%m-%d', JULIAN_DAY)
+	rewritten := r["rewritten"].(string)
+	if !regexp.MustCompile(`strftime\('%Y-%m-%d', \d{7}\.\d+\)`).MatchString(rewritten) {
+		t.Fatalf("expected single-argument strftime to be replaced with Julian day, got: %s", rewritten)
 	}
 }
 

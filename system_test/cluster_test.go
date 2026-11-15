@@ -246,11 +246,17 @@ func Test_MultiNodeCluster_TimeDate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to INSERT record: %s", err.Error())
 	}
+	// Also exercise the zero-argument form, which used to be replicated
+	// verbatim and would evaluate to a different wall-clock time on each node.
+	_, err = node1.Execute(`INSERT INTO foo(date) VALUES(time())`)
+	if err != nil {
+		t.Fatalf("failed to INSERT record: %s", err.Error())
+	}
 	r, err := node1.QueryStrongConsistency("SELECT COUNT(*) FROM foo")
 	if err != nil {
 		t.Fatalf("failed to query for count: %s", err.Error())
 	}
-	if got, exp := r, `{"results":[{"columns":["COUNT(*)"],"types":["integer"],"values":[[1]]}]}`; got != exp {
+	if got, exp := r, `{"results":[{"columns":["COUNT(*)"],"types":["integer"],"values":[[2]]}]}`; got != exp {
 		t.Fatalf("wrong query results, exp %s, got %s", exp, got)
 	}
 
