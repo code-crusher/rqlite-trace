@@ -1,3 +1,7 @@
+## Unreleased
+### Implementation changes and bug fixes
+- Abort in-flight snapshot restores when the Store is shutting down, so a Ctrl+C during a snapshot transfer or node restore exits promptly instead of waiting for the restore to complete. Fixes issue [#1695](https://github.com/rqlite/rqlite/issues/1695).
+
 ## v10.7.1 (November 9th 2026)
 This release is unchanged relative to v10.7.0 and simply fixes a Docker packaging issue.
 

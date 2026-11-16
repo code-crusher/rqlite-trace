@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/rqlite/rqlite/v10/db"
 	"github.com/rqlite/rqlite/v10/internal/fsutil"
@@ -151,18 +154,88 @@ func Test_Restore_CorruptWAL(t *testing.T) {
 		t.Fatalf("expected WAL 0 CRC mismatch error, got: %v", err)
 	}
 
-	// No temporary WAL files should be left behind from the failed restore...
-	// (the existing code doesn't clean up on error, so this is informational
-	// only — we just confirm the restored DB is the unchecksummed DB and not
-	// a checkpointed one.)
+	// No temporary WAL files should be left behind from the failed restore.
 	entries, _ := os.ReadDir(filepath.Dir(dstPath))
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), "restore-wal-") {
-			// Clean up in case the test runs in a shared dir.
-			fsutil.Remove(filepath.Join(filepath.Dir(dstPath), e.Name()))
+			t.Fatalf("temporary WAL file %s was not cleaned up", e.Name())
 		}
 	}
 }
+
+func Test_Restore_AbortedWAL(t *testing.T) {
+	// A restore aborted mid-WAL (e.g. because the node is shutting down,
+	// see issue #1695) must not leave temporary WAL files behind.
+	srcDB := "testdata/db-and-wals/backup.db"
+	walFiles := []string{
+		"testdata/db-and-wals/wal-00",
+		"testdata/db-and-wals/wal-01",
+	}
+	stream := mustBufferStream(t, srcDB, walFiles...)
+
+	// Truncate the stream in the middle of the first WAL, then serve it
+	// through a reader that blocks forever once the buffered data runs out,
+	// simulating a stalled transfer.
+	hdrLen := binary.BigEndian.Uint32(stream[:HeaderSizeLen])
+	hdrBytes := stream[HeaderSizeLen : HeaderSizeLen+hdrLen]
+	hdr, err := UnmarshalSnapshotHeader(hdrBytes)
+	if err != nil {
+		t.Fatalf("UnmarshalSnapshotHeader failed: %v", err)
+	}
+	full := hdr.GetFull()
+	walStart := int(HeaderSizeLen) + int(hdrLen) + int(full.DbHeader.SizeBytes)
+	truncated := stream[:walStart+int(full.WalHeaders[0].SizeBytes)/2]
+
+	dstPath := filepath.Join(t.TempDir(), "restored.db")
+	br := newBlockingReader(truncated)
+	go func() {
+		// Unblock the stalled read, as the Store would during shutdown.
+		time.Sleep(250 * time.Millisecond)
+		br.Close()
+	}()
+	_, err = Restore(br, dstPath)
+	if err == nil {
+		t.Fatal("expected error from aborted restore, got nil")
+	}
+
+	// No temporary WAL files should be left behind from the aborted restore.
+	entries, _ := os.ReadDir(filepath.Dir(dstPath))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "restore-wal-") {
+			t.Fatalf("temporary WAL file %s was not cleaned up", e.Name())
+		}
+	}
+}
+
+// blockingReader serves the given data, then blocks until closed. It
+// simulates a snapshot stream that stalls mid-transfer.
+type blockingReader struct {
+	data []byte
+	off  int
+	c    chan struct{}
+	once sync.Once
+}
+
+func newBlockingReader(data []byte) *blockingReader {
+	return &blockingReader{data: data, c: make(chan struct{})}
+}
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	if b.off < len(b.data) {
+		n := copy(p, b.data[b.off:])
+		b.off += n
+		return n, nil
+	}
+	<-b.c
+	return 0, fsErrClosed
+}
+
+func (b *blockingReader) Close() error {
+	b.once.Do(func() { close(b.c) })
+	return nil
+}
+
+var fsErrClosed = fs.ErrClosed
 
 // mustBufferStream returns the entire framed snapshot stream produced by
 // SnapshotStreamer for the given DB and (optional) WAL files.

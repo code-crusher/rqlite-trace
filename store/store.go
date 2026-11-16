@@ -114,6 +114,10 @@ var (
 	// WAL data to snapshot. This can happen when the Raft log contains only entries
 	// that don't modify the database (e.g. cluster membership changes).
 	ErrNoWALToSnapshot = errors.New("no WAL data available for snapshot")
+
+	// ErrClosing is returned when an in-flight operation is aborted
+	// because the Store is shutting down.
+	ErrClosing = errors.New("store closing")
 )
 
 const (
@@ -355,6 +359,12 @@ type Store struct {
 	snapshotWClose chan struct{}
 	snapshotWDone  chan struct{}
 
+	// closingCh is closed when the Store begins shutting down. Long-running
+	// operations, such as an in-flight snapshot restore, watch it so they
+	// can abort promptly instead of blocking shutdown until complete.
+	closingCh chan struct{}
+	closeOnce sync.Once
+
 	// Snapshotting synchronization and management
 	snapshotSync *rsync.SyncChannels
 	snapshotCAS  *rsync.CheckAndSet
@@ -475,6 +485,7 @@ func New(c *Config, ly Layer) *Store {
 		cdcConf:           c.CDC,
 		cdcOutCh:          make(chan *proto.CDCIndexedEventGroup, cdcChanLen),
 		readyChans:        rsync.NewReadyChannels(),
+		closingCh:         make(chan struct{}),
 		leaderObservers:   make([]chan<- bool, 0),
 		reqMarshaller:     command.NewRequestMarshaler(),
 		throttler:         throttler.DefaultThrottler(),
@@ -536,6 +547,12 @@ func (s *Store) Open() (retErr error) {
 	s.numLRUpgraded.Store(0)
 	s.numNoops.Store(0)
 	s.numSnapshots.Store(0)
+	// The Store can be closed and re-opened; re-arm the shutdown signal so
+	// that a restore performed as part of this Open (e.g. the startup
+	// restore from a preexisting snapshot) is not immediately aborted
+	// because of the previous shutdown.
+	s.closingCh = make(chan struct{})
+	s.closeOnce = sync.Once{}
 	s.openT = time.Now()
 	s.logger.Printf("opening store with node ID %s, listening on %s", s.raftID, s.ly.Addr().String())
 
@@ -1001,6 +1018,14 @@ func (s *Store) Close(wait bool) (retErr error) {
 		// Protect against closing already-closed resources, such as channels.
 		return nil
 	}
+
+	// Signal any long-running operations (such as an in-flight snapshot
+	// restore) to abort, so closing the store is not blocked by them. This
+	// must happen before the pre-close snapshot below, since that too would
+	// otherwise wait behind an in-flight restore on the FSM goroutine.
+	s.closeOnce.Do(func() {
+		close(s.closingCh)
+	})
 
 	if !s.NoSnapshotOnClose {
 		// Snapshot before closing to minimize startup time on next open.
@@ -2838,6 +2863,16 @@ func (s *Store) fsmRestore(rc io.ReadCloser) (retErr error) {
 	s.logger.Printf("initiating node restore on node ID %s", s.raftID)
 	startT := time.Now()
 
+	// Abort the restore if the Store begins shutting down while it is in
+	// progress. Otherwise a large transfer would block Close (and so a
+	// Ctrl+C) until it completed, since Raft's shutdown waits for the FSM
+	// goroutine to finish any in-flight restore. See issue #1695.
+	defer func() {
+		if errors.Is(retErr, ErrClosing) {
+			s.logger.Printf("restore aborted on node ID %s due to shutdown", s.raftID)
+		}
+	}()
+
 	// Create a scratch file path, then extract the database from the
 	// protobuf-framed snapshot stream into it.
 	tmpFile, err := createTemp(s.dbDir, restoreScratchPattern)
@@ -2848,9 +2883,9 @@ func (s *Store) fsmRestore(rc io.ReadCloser) (retErr error) {
 	tmpFile.Close()
 	defer fsutil.Remove(tmpPath)
 
-	if _, err := snapshot.Restore(rc, tmpPath); err != nil {
+	if _, err := snapshot.Restore(newClosingReader(rc, s.closingCh), tmpPath); err != nil {
 		rc.Close()
-		return fmt.Errorf("error restoring database from snapshot: %v", err)
+		return fmt.Errorf("error restoring database from snapshot: %w", err)
 	}
 
 	// The snapshot stream is now fully drained into tmpPath, so close the reader

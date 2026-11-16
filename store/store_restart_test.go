@@ -14,6 +14,64 @@ import (
 	"github.com/rqlite/rqlite/v10/snapshot"
 )
 
+// Test_SingleNodeRestoreAbort tests that an in-flight node restore is aborted
+// when the Store is closed, rather than blocking Close until the (potentially
+// very long) restore completes. See issue #1695.
+func Test_SingleNodeRestoreAbort(t *testing.T) {
+	s, ln := mustNewStore(t)
+	defer ln.Close()
+	if err := s.Open(); err != nil {
+		t.Fatalf("failed to open single-node store: %s", err.Error())
+	}
+	s.NoSnapshotOnClose = true // Not testing snapshot-on-close here.
+
+	// A restore fed by a reader that never yields data simulates a stalled
+	// snapshot transfer or a very large, slow restore.
+	br := newBlockingReader()
+	defer br.Close()
+
+	restoreDone := make(chan error, 1)
+	go func() {
+		restoreDone <- s.fsmRestore(br)
+	}()
+
+	// Give the restore time to establish, then close the Store. The close
+	// must not be blocked by the in-flight restore, and the restore itself
+	// must return promptly with an error.
+	time.Sleep(250 * time.Millisecond)
+	closeComplete := make(chan error, 1)
+	go func() {
+		closeComplete <- s.Close(true)
+	}()
+
+	select {
+	case err := <-restoreDone:
+		if err == nil {
+			t.Fatalf("expected aborted restore to return an error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("restore was not aborted by closing the store")
+	}
+
+	select {
+	case err := <-closeComplete:
+		if err != nil {
+			t.Fatalf("failed to close store: %s", err.Error())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("close was blocked by in-flight restore")
+	}
+
+	// No scratch files from the aborted restore should remain.
+	files, err := filepath.Glob(filepath.Join(s.dbDir, restoreScratchPattern))
+	if err != nil {
+		t.Fatalf("failed to check for leftover restore files: %s", err.Error())
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected no leftover restore scratch files, got %v", files)
+	}
+}
+
 // Test_OpenStoreCloseStartupSingleNode tests various restart scenarios.
 func Test_OpenStoreCloseStartupSingleNode(t *testing.T) {
 	s, ln := mustNewStore(t)

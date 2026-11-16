@@ -80,8 +80,17 @@ func Restore(r io.Reader, dstPath string) (int64, error) {
 	if len(full.WalHeaders) > 0 {
 		dir := filepath.Dir(dstPath)
 		var walFiles []string
+		// Remove any temporary WAL files created below if the restore
+		// does not complete, whether due to bad data or the restore
+		// being aborted mid-stream (e.g. the node is shutting down).
+		defer func() {
+			for _, wf := range walFiles {
+				fsutil.Remove(wf)
+			}
+		}()
 		for i, wh := range full.WalHeaders {
 			walPath := filepath.Join(dir, fmt.Sprintf("restore-wal-%d.tmp", i))
+			walFiles = append(walFiles, walPath)
 			wf, err := os.Create(walPath)
 			if err != nil {
 				return totalRead, err
@@ -99,7 +108,6 @@ func Restore(r io.Reader, dstPath string) (int64, error) {
 			if got, want := walCR.Sum32(), wh.Crc32; got != want {
 				return totalRead, fmt.Errorf("CRC32 mismatch for WAL file %d: got %08x, expected %08x", i, got, want)
 			}
-			walFiles = append(walFiles, walPath)
 		}
 		if err := db.ReplayWAL(dstPath, walFiles, false); err != nil {
 			return totalRead, fmt.Errorf("checkpointing WALs: %w", err)
