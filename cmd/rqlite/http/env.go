@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -12,41 +13,69 @@ const (
 	maxPortNumber = 65535
 )
 
-// ParseHostEnv parses a host URL from an environment variable and extracts its components.
-// It returns the protocol scheme, hostname, port number, or any parsing error encountered.
-func ParseHostEnv(varName string) (protocol, host string, port uint16, err error) {
+// HostSpec is a single host URL parsed from an environment variable such as
+// RQLITE_HOST.
+type HostSpec struct {
+	Protocol string
+	Host     string
+	Port     uint16
+}
+
+// ParseHostsEnv parses a comma-delimited set of host URLs from the environment
+// variable named varName. Each URL has the form [scheme:]//host[:port], and at
+// least one URL must be supplied. The first URL addresses the primary host; any
+// subsequent URLs can be used as failover alternatives.
+func ParseHostsEnv(varName string) ([]HostSpec, error) {
 	hostEnv, found := os.LookupEnv(varName)
 	if !found {
-		return "", "", 0, fmt.Errorf("%s environment variable not set", varName)
+		return nil, fmt.Errorf("%s environment variable not set", varName)
 	}
 
-	uri, err := url.Parse(hostEnv)
+	var specs []HostSpec
+	for _, entry := range strings.Split(hostEnv, ",") {
+		if entry = strings.TrimSpace(entry); entry == "" {
+			continue
+		}
+		spec, err := parseHostURL(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", varName, err)
+		}
+		specs = append(specs, spec)
+	}
+	if len(specs) == 0 {
+		return nil, fmt.Errorf("%s does not contain any host URLs", varName)
+	}
+	return specs, nil
+}
+
+// parseHostURL parses a single [scheme:]//host[:port] URL.
+func parseHostURL(u string) (HostSpec, error) {
+	uri, err := url.Parse(u)
 	if err != nil {
-		return "", "", 0, err
+		return HostSpec{}, err
 	}
 
 	if uri.Scheme != "http" && uri.Scheme != "https" && uri.Scheme != "" {
-		return "", "", 0, fmt.Errorf("unsupported protocol %s", uri.Scheme)
+		return HostSpec{}, fmt.Errorf("unsupported protocol %s", uri.Scheme)
 	}
-	protocol = uri.Scheme
 
 	if uri.Hostname() == "" {
-		return "", "", 0, fmt.Errorf("%s does not contain a hostname", varName)
+		return HostSpec{}, fmt.Errorf("no hostname in '%s'", u)
 	}
-	host = uri.Hostname()
+	spec := HostSpec{Protocol: uri.Scheme, Host: uri.Hostname()}
 
 	if uri.Port() == "" {
-		return protocol, host, 0, nil
+		return spec, nil
 	}
 
-	portStr := uri.Port()
-	p, err := strconv.Atoi(portStr)
+	p, err := strconv.Atoi(uri.Port())
 	if err != nil {
-		return "", "", 0, fmt.Errorf("port '%s' is not a valid number: %w", portStr, err)
+		return HostSpec{}, fmt.Errorf("port '%s' is not a valid number: %w", uri.Port(), err)
 	}
-
 	if p < minPortNumber || p > maxPortNumber {
-		return "", "", 0, fmt.Errorf("port number %d is outside of valid range [%d, %d]", p, minPortNumber, maxPortNumber)
+		return HostSpec{}, fmt.Errorf("port number %d is outside of valid range [%d, %d]",
+			p, minPortNumber, maxPortNumber)
 	}
-	return protocol, host, uint16(p), nil
+	spec.Port = uint16(p)
+	return spec, nil
 }

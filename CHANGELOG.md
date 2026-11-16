@@ -1,3 +1,7 @@
+## Unreleased
+### New features
+- Support comma-delimited sets of URLs in `RQLITE_HOST`, with failover to the next URL when a host is unreachable. The rqlite shell also now connects through a failover host instead of exiting, and shows the host actually connected to. Implements issue [#2010](https://github.com/rqlite/rqlite/issues/2010).
+
 ## v10.7.1 (November 9th 2026)
 This release is unchanged relative to v10.7.0 and simply fixes a Docker packaging issue.
 

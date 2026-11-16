@@ -46,7 +46,7 @@ Options:
 
 The rqlite shell also supports configuration through environment variables:
 
-- `RQLITE_HOST`: Connection string in the format `[scheme:]//host[:port]`
+- `RQLITE_HOST`: Comma-delimited set of connection URLs, each in the format `[scheme:]//host[:port]`. The first URL addresses the primary host; any subsequent URLs are used as failover alternatives. Explicit command-line flags (`--host`, `--port`, `--scheme`) take precedence over this variable.
 
 ## Example
 Connecting to a host running locally:

@@ -114,21 +114,23 @@ func main() {
 			return nil
 		}
 
-		_, hostEnvSet := os.LookupEnv(HOST_ENV_VAR)
-		if hostEnvSet && !(ctx.IsSet("--host", "-H") || ctx.IsSet("--port", "-p") || ctx.IsSet("--scheme", "-s")) {
-			protocol, host, port, err := httpcl.ParseHostEnv(HOST_ENV_VAR)
+		var envAltHosts []httpcl.HostSpec
+		if _, ok := os.LookupEnv(HOST_ENV_VAR); ok &&
+			!(ctx.IsSet("--host", "-H") || ctx.IsSet("--port", "-p") || ctx.IsSet("--scheme", "-s")) {
+			// The first URL addresses the primary host; any subsequent URLs
+			// are used as failover alternatives.
+			envHosts, err := httpcl.ParseHostsEnv(HOST_ENV_VAR)
 			if err != nil {
 				return err
 			}
-			if protocol != "" {
-				argv.Protocol = protocol
+			if envHosts[0].Protocol != "" {
+				argv.Protocol = envHosts[0].Protocol
 			}
-			if host != "" {
-				argv.Host = host
+			argv.Host = envHosts[0].Host
+			if envHosts[0].Port != 0 {
+				argv.Port = envHosts[0].Port
 			}
-			if port != 0 {
-				argv.Port = port
-			}
+			envAltHosts = envHosts[1:]
 		}
 
 		httpClient, err := getHTTPClient(argv)
@@ -137,19 +139,26 @@ func main() {
 			return nil
 		}
 
-		hosts := createHostList(argv)
+		hosts := createHostList(argv, envAltHosts)
 		client := httpcl.NewClient(httpClient, hosts,
 			httpcl.WithScheme(argv.Protocol),
 			httpcl.WithBasicAuth(argv.Credentials),
 			httpcl.WithPrefix(argv.Prefix))
 
-		connectionStr := fmt.Sprintf("%s://%s", argv.Protocol, address6(argv))
+		connectedHost := address6(argv)
 		version, err := getVersion(client)
+		var hcerr *httpcl.HostChangedError
+		if errors.As(err, &hcerr) {
+			// Connecting required failing over to another host, so make that
+			// visible to the user.
+			connectedHost = hcerr.NewHost
+			err = nil
+		}
 		if err != nil {
 			msg := err.Error()
 			if errors.Is(err, syscall.ECONNREFUSED) {
 				msg = fmt.Sprintf("Unable to connect to rqlited at %s - is it running?",
-					connectionStr)
+					connectionStr(connectedHost, argv))
 			}
 			ctx.String("%s %v\n", ctx.Color().Red("ERR!"), msg)
 			return nil
@@ -157,7 +166,7 @@ func main() {
 
 		fmt.Println("Welcome to the rqlite CLI.")
 		fmt.Printf("Enter \".help\" for usage hints.\n")
-		fmt.Printf("Connected to %s running version %s\n", connectionStr, version)
+		fmt.Printf("Connected to %s running version %s\n", connectionStr(connectedHost, argv), version)
 
 		blobArray := false
 		timer := false
@@ -165,7 +174,7 @@ func main() {
 		changes := false
 		consistency := "weak"
 		mode := "column"
-		prefix := fmt.Sprintf("%s>", address6(argv))
+		prefix := fmt.Sprintf("%s>", connectedHost)
 
 		var output io.Writer = os.Stdout
 		var outputFile *os.File
@@ -743,15 +752,21 @@ func getVersion(client *httpcl.Client) (string, error) {
 	u := fmt.Sprintf("%sstatus", client.Prefix)
 	resp, err := client.Get(u)
 	if err != nil {
-		return "", err
+		// A HostChangedError is returned alongside a valid response when the
+		// request was served by a failover host, so the version can still be
+		// retrieved.
+		var hcerr *httpcl.HostChangedError
+		if !errors.As(err, &hcerr) || resp == nil {
+			return "", err
+		}
 	}
 	defer resp.Body.Close()
 
 	version, ok := resp.Header["X-Rqlite-Version"]
 	if !ok || len(version) != 1 {
-		return "unknown", nil
+		version = []string{"unknown"}
 	}
-	return version[0], nil
+	return version[0], err
 }
 
 func parseResponse(response []byte, ret any) error {
@@ -893,9 +908,20 @@ func urlsToWriter(client *httpcl.Client, urls []string, w io.Writer) error {
 	return nil
 }
 
-func createHostList(argv *argT) []string {
+func createHostList(argv *argT, envAltHosts []httpcl.HostSpec) []string {
 	var hosts = make([]string, 0)
 	hosts = append(hosts, address6(argv))
+	// Environment-supplied alternative hosts take precedence over the
+	// -a/--alternatives flag, since explicit env-var use indicates the
+	// operator wants these hosts. A URL without an explicit port uses the
+	// same port as the primary host.
+	for _, a := range envAltHosts {
+		port := a.Port
+		if port == 0 {
+			port = argv.Port
+		}
+		hosts = append(hosts, net.JoinHostPort(a.Host, fmt.Sprintf("%d", port)))
+	}
 	// Alternatives is a comma-separated list. Skip empty entries so a blank or
 	// trailing-comma value doesn't add a bogus "" host to the failover list
 	// (strings.Split("", ",") returns [""]).
@@ -911,4 +937,10 @@ func createHostList(argv *argT) []string {
 // which is compatible with IPv6 addresses.
 func address6(argv *argT) string {
 	return net.JoinHostPort(argv.Host, fmt.Sprintf("%d", argv.Port))
+}
+
+// connectionStr returns the URL string for the given host, compatible with
+// IPv6 addresses.
+func connectionStr(host string, argv *argT) string {
+	return fmt.Sprintf("%s://%s", argv.Protocol, host)
 }
