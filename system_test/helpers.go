@@ -289,6 +289,101 @@ func (n *Node) Load(filename string) (string, error) {
 	return n.postFile("/db/load", filename)
 }
 
+// RegisterQueries registers the given queries, returning the registered
+// queries, including their generated IDs.
+func (n *Node) RegisterQueries(stmts []string) ([]store.RegisteredQuery, error) {
+	j, err := json.Marshal(stmts)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.Post("http://"+n.APIAddr+"/db/queries", "application/json", strings.NewReader(string(j)))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("queries endpoint returned: %s (%s)", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var r struct {
+		Results []store.RegisteredQuery `json:"results"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, err
+	}
+	return r.Results, nil
+}
+
+// RegisteredQueries returns every query in the node's registry.
+func (n *Node) RegisteredQueries() ([]store.RegisteredQuery, error) {
+	resp, err := http.Get("http://" + n.APIAddr + "/db/queries")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("queries endpoint returned: %s (%s)", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var r struct {
+		Results []store.RegisteredQuery `json:"results"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, err
+	}
+	return r.Results, nil
+}
+
+// InvokeRegisteredQuery invokes the query registered under id, supplying the
+// given parameters, which must be encodable as JSON. Pass nil for no
+// parameters.
+func (n *Node) InvokeRegisteredQuery(id string, params any) (string, error) {
+	var body string
+	if params != nil {
+		j, err := json.Marshal(params)
+		if err != nil {
+			return "", err
+		}
+		body = string(j)
+	}
+	resp, err := http.Post("http://"+n.APIAddr+"/db/queries/"+id, "application/json", strings.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("queries endpoint returned: %s", resp.Status)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// DeregisterQuery removes the query registered under id.
+func (n *Node) DeregisterQuery(id string) error {
+	req, err := http.NewRequest(http.MethodDelete, "http://"+n.APIAddr+"/db/queries/"+id, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("queries endpoint returned: %s", resp.Status)
+	}
+	return nil
+}
+
 // Backup backs up the node's database to the given file.
 func (n *Node) Backup(filename string, compress bool, format string) error {
 	v, _ := url.Parse("http://" + n.APIAddr + "/db/backup")

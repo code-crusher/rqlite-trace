@@ -192,6 +192,10 @@ const (
 	numSnapshots                      = "user_snapshots"
 	numReaps                          = "user_reaps"
 	numSQLAnalyze                     = "sql_analyze"
+	numQueriesRegistered              = "registered_queries_registered"
+	numQueriesDeregistered            = "registered_queries_deregistered"
+	numQueriesInvoked                 = "registered_queries_invoked"
+	numQueriesNotFound                = "registered_queries_not_found"
 	numAuthOK                         = "auth_ok"
 	numAuthFail                       = "auth_fail"
 	numTLSCertFetched                 = "tls_cert_fetched"
@@ -266,6 +270,10 @@ func ResetStats() {
 	stats.Add(numSnapshots, 0)
 	stats.Add(numReaps, 0)
 	stats.Add(numSQLAnalyze, 0)
+	stats.Add(numQueriesRegistered, 0)
+	stats.Add(numQueriesDeregistered, 0)
+	stats.Add(numQueriesInvoked, 0)
+	stats.Add(numQueriesNotFound, 0)
 	stats.Add(numAuthOK, 0)
 	stats.Add(numAuthFail, 0)
 	stats.Add(numTLSCertFetched, 0)
@@ -487,6 +495,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/db/execute"):
 		stats.Add(numExecutions, 1)
 		s.handleExecute(w, r, params)
+	case strings.HasPrefix(r.URL.Path, queriesPath):
+		s.handleQueries(w, r, params)
 	case strings.HasPrefix(r.URL.Path, "/db/query"):
 		stats.Add(numQueries, 1)
 		s.handleQuery(w, r, params)
